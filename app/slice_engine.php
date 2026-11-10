@@ -1,7 +1,7 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 8d1e2e0a155207b8, 2026-11-10 09:09 UTC
+ * Quelle: print_slice_lib.php, sha256 52114a3740bbc45d, 2026-11-10 17:38 UTC
  * 58 von 98 Funktionen, 18 Konstanten.
  */
 
@@ -650,7 +650,9 @@ function ps_job_create(PDO $pdo, int $uid, array $printer, array $upload, array 
     $job = ['id' => $id, 'user_id' => $uid, 'status' => 'queued', 'created' => time(),
             'file' => basename($model), 'name' => $nm($upload) . ($parts && count($parts) > 1 ? ' +' . (count($parts) - 1) : ''),
             'ext' => $is_gc ? 'gcode' : $ext, 'printer' => ['provider' => $printer['provider'], 'id' => $printer['id'], 'name' => $printer['name'], 'model' => $printer['model'],
-                                          'vendor' => $printer['vendor'], 'machine' => $printer['machine'], 'cfs' => !empty($printer['cfs'])],
+                                          'vendor' => $printer['vendor'], 'machine' => $printer['machine'], 'cfs' => !empty($printer['cfs'])]
+                                          // AllMyPrinters-App (amp_printer): Fach im Startbefehl — 'seq' T lückenlos wie Anycubic, 'keep' T wie Orca (10.11.2026)
+                                          + (in_array($printer['tools'] ?? '', ['seq', 'keep'], true) ? ['tools' => $printer['tools']] : []),
             'slot' => $slot, 'tool' => $tool, 'supports' => !empty($opt['supports']), 'bed' => isset(PS_BED_TYPES[$opt['bed'] ?? '']) ? $opt['bed'] : 'textured',
             'info3mf' => $info, 'arrange' => $ext === '3mf' && !empty($opt['arrange']), 'parts' => $parts, 'x' => $x];
     // Jede STL in ihrem eigenen Fach: wie ein zugeordneter Mehrfarbdruck (ps_job_set_map) — Werkzeugwechsel stehen im G-Code
@@ -960,7 +962,8 @@ function ps_slice(array $job): array {
         $by = null;
         if (preg_match('/^; filament used \[g\] = ([\d., ]+)/m', (string)shell_exec('tail -c 40000 ' . escapeshellarg($gcode)), $mg)) $by = array_map('floatval', explode(',', $mg[1]));
         $tools = [];
-        if ($job['printer']['provider'] === 'anycubic') {
+        $tm = (string)($job['printer']['tools'] ?? '');   // nur App-Drucker: 'seq' / 'keep' (sonst leer → wie bisher)
+        if ($job['printer']['provider'] === 'anycubic' || $tm === 'seq') {
             // Anycubic: T-Nummern lückenlos machen (Platte nutzt Filament 1 und 4 → T0, T1 statt T0, T3) — die Fachzuordnung
             // im Startbefehl hat dann genau einen Eintrag je T in Reihenfolge, egal ob die Firmware nach paint_index
             // oder nach Position nachschlägt. Unbenutzte Filamente (bemalte Projekte) bekommen kein Werkzeug.
@@ -971,7 +974,7 @@ function ps_slice(array $job): array {
                 if ($used) $tools[$f['ext'] - 1] = [$f['tool'], (string)$f['slot']['label']];
             }
             unset($f);
-        } elseif ($job['printer']['provider'] === 'creality') {
+        } elseif ($job['printer']['provider'] === 'creality' || $tm === 'keep') {
             // Creality: G-Code bleibt wie von Orca (T<Filament-1>), welches CFS-Fach je Filament, steht im Druckauftrag
             // (filamentsList, ps_creality_task). tool = T-Nummer nur für Vorschaufarben und „benutzt?“.
             foreach ($job['fils'] as &$f) $f['tool'] = $by === null || ($by[$f['ext'] - 1] ?? 0) > 0 ? $f['ext'] - 1 : null;
@@ -991,7 +994,8 @@ function ps_slice(array $job): array {
         if ($temps && max($temps) - min($temps) >= PS_MIX_TEMP_NOTE) $job['mix_temp'] = [min($temps), max($temps)];
         // Immer auch G90 + Extrusionsart nach jedem Wechsel (Wechsel-Makro ließ am 02.10. G91 stehen) — nicht bei Creality,
         // dort gehört der Wechsel der Firmware
-        if ($job['printer']['provider'] !== 'creality') ps_remap_tools($gcode, $tools, $job['printer']['provider'] === 'moonraker');
+        // 'keep' (App: Bambu, Elegoo, Creality, Flashforge): T bleibt — Bambu wechselt per M620 S<n>, ein Umschreiben nur der T-Zeilen passte nicht dazu
+        if ($job['printer']['provider'] !== 'creality' && $tm !== 'keep') ps_remap_tools($gcode, $tools, $job['printer']['provider'] === 'moonraker' && $tm === '');
     }
     $job['slice_seconds'] = round(microtime(true) - $t0, 1);
     $job['profiles'] = ['machine' => $machine, 'process' => $process, 'filament' => $filament];
@@ -1756,6 +1760,20 @@ function ps_paint_view(array $job): ?array {
  * Mehrfarbig: Gramm je Projekt-Filament aus dem G-Code-Kopf („filament used [g] = a, b“), gleiche Fächer zusammengefasst.
  */
 function ps_job_paint(array $job): array {
+    // AllMyPrinters-App, Fach im Startbefehl ('seq'/'keep'): ein Eintrag je benutztem Werkzeug mit seiner T-Nummer — der Startbefehl
+    // (ams_box_mapping, ams_mapping, slot_map …) braucht jede T-Nummer; zwei Filamente im selben Fach blieben sonst ohne Zuordnung
+    if (!empty($job['fils']) && in_array($job['printer']['tools'] ?? '', ['seq', 'keep'], true)) {
+        $by = $job['stats']['grams_by'] ?? [];
+        $out = [];
+        foreach ($job['fils'] as $f) {
+            if ($f['tool'] === null) continue;
+            $out[] = ['slot' => (int)$f['slot']['index'], 'tool' => (int)$f['tool'], 'g' => round((float)($by[$f['ext'] - 1] ?? 0), 2),
+                      'material' => (string)$f['slot']['material'], 'color' => $f['slot']['color'] ?? null];
+        }
+        if ($out && !array_sum(array_column($out, 'g'))) $out[0]['g'] = (float)($job['stats']['grams'] ?? 0);
+        $out = array_values(array_filter($out, fn($e) => $e['g'] > 0));
+        if ($out) return $out;
+    }
     if (empty($job['fils'])) {
         return [['slot' => (int)$job['slot']['index'], 'g' => (float)($job['stats']['grams'] ?? 0),
                  'material' => (string)$job['slot']['material'], 'color' => $job['slot']['color'] ?? null]];

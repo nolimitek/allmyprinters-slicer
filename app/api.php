@@ -90,7 +90,10 @@ function amp_count(string $key, int $max): bool {
 $a = (string)($_GET['a'] ?? $_POST['a'] ?? '');
 if ($a === 'version') {
     $orca = trim((string)@file_get_contents('/opt/orcaslicer/VERSION')) ?: null;
-    amp_json(['name' => 'allmyprinters-slicer', 'api' => AMP_API, 'version' => AMP_VERSION, 'orca' => $orca, 'limits' => getenv('AMP_LIMITS') === '1']);
+    // features: was dieser Container kann — die App sagt Selbsthostern, wenn eine ihrer Funktionen einen neueren Container braucht
+    // (multi_start ab 1.0.3: Mehrfarbig für Drucker, deren Startbefehl die Fächer zuordnet — Bambu, Anycubic LAN, Elegoo, Creality, Flashforge)
+    amp_json(['name' => 'allmyprinters-slicer', 'api' => AMP_API, 'version' => AMP_VERSION, 'orca' => $orca, 'limits' => getenv('AMP_LIMITS') === '1',
+              'features' => ['multi_start']]);
 }
 
 $dev = strtolower((string)($_SERVER['HTTP_X_AMP_DEVICE'] ?? ''));
@@ -142,7 +145,10 @@ function amp_printer(array $r): ?array {
             'model' => mb_substr((string)($r['model'] ?? ''), 0, 60), 'online' => true, 'busy' => false, 'img' => '', 'can_print' => true, 'testers_only' => false,
             'box' => $has_box, 'slots' => $slots, 'slot_mode' => $any ? 'slots' : 'material', 'tool0' => $tool0, 'ttg' => $tool0 === null ? $ttg : null,
             'machine' => $machine, 'vendor' => $vendor, 'exact' => true, 'chosen' => true, 'level' => ['mode' => 'none'], 'cfs' => false,
-            'caps' => ps_machine_caps($vendor, $machine), 'multi' => $has_box && $tool0 === null && $ttg !== null];
+            'caps' => ps_machine_caps($vendor, $machine),
+            // Mehrfarbig auch, wo der Startbefehl die Fächer zuordnet (10.11.2026, User: „kommt keine Farbzuordnung“): Anycubic LAN mit T
+            // lückenlos wie die Anycubic-Cloud ('seq'), Bambu/Elegoo/Creality/Flashforge mit T wie von Orca ('keep') — ps_slice/ps_job_paint
+            'multi' => $has_box && ($own || ($tool0 === null && $ttg !== null))] + ($has_box && $own ? ['tools' => (string)$r['kind'] === 'acl' ? 'seq' : 'keep'] : []);
 }
 
 // ── Lesen ────────────────────────────────────────────────────────────────────
