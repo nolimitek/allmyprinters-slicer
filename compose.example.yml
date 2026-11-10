@@ -1,0 +1,20 @@
+# AllMyPrinters Slicer — docker compose -f compose.example.yml up -d
+services:
+  slicer:
+    image: ghcr.io/nolimitek/allmyprinters-slicer:latest
+    container_name: allmyprinters-slicer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - slicer-data:/data
+    # Hardening: read-only filesystem (jobs live in /data, uploads in /tmp), no extra privileges
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  slicer-data:
