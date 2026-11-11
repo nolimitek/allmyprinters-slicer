@@ -27,7 +27,7 @@ big multi-color models need more.
 
 ## What's inside
 
-- **OrcaSlicer 2.4.2** (official Linux AppImage, checksum-verified at build time) with all bundled printer, process and filament profiles.
+- **OrcaSlicer 2.5.0** (official Linux AppImage, checksum-verified at build time) with all bundled printer, process and filament profiles.
 - The same slicing pipeline the app uses on our server: profile selection per printer, multi-color slot mapping, multi-plate 3MF,
   supports, expert settings, pause at height, G-code preview.
 - No account, no telemetry. The container never connects anywhere on its own.
@@ -77,4 +77,4 @@ The code in this repository is licensed under the **GNU Affero General Public Li
 If you run a modified version as a network service, you must offer its source code to its users.
 
 OrcaSlicer is licensed under the GNU AGPL v3.0 as well; the source code of the bundled version is at
-<https://github.com/OrcaSlicer/OrcaSlicer/tree/v2.4.2>.
+<https://github.com/OrcaSlicer/OrcaSlicer/tree/v2.5.0>.

@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 52114a3740bbc45d, 2026-11-10 17:38 UTC
- * 58 von 98 Funktionen, 18 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 79f78ef56d9d2dbe, 2026-11-11 20:36 UTC
+ * 59 von 99 Funktionen, 18 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -802,7 +802,7 @@ function ps_slice(array $job): array {
     $process = ps_process_for($v, $machine);
     $filament = ps_filament_for($v, $machine, (string)$job['slot']['material']);
 
-    $m = ps_flatten($v, 'machine', $machine, ['inherits' => $machine]);   // inherits = eigener Name, sonst „nicht kompatibel“
+    $m = ps_flatten($v, 'machine', $machine, ps_orca_self_inherit() ? ['inherits' => $machine] : []);   // inherits = eigener Name, sonst „nicht kompatibel“ (bis Orca 2.4)
     // Kobra 3: Randstreifen als Ring (ganzes Bett + inneres Quadrat) — die CLI liest das als EINE Fläche über das
     // ganze Bett → „One of the plate is empty“. Sperrfläche, die mit dem kompletten Bett beginnt, weglassen.
     $ex = array_values((array)($m['bed_exclude_area'] ?? []));
@@ -1072,6 +1072,18 @@ function ps_insert_toolchange(string $gcode, int $tool, string $label): void {
  * umschreiben, danach wie bei ps_insert_toolchange G90/M83 (Rinkhals' Wechsel-Makro lässt G91 stehen).
  * $tools = [n => [werkzeug, fachname]]. Unbekannte n bleiben, wie sie sind.
  */
+/**
+ * Orca ab 2.5 löst „inherits“ über einen system-Ordner auf und bricht ohne ihn ab („can not resolve preset … "system"“) —
+ * das flache Maschinenprofil braucht den Selbstverweis dort nicht mehr, die Kompatibilität passt über compatible_printers
+ * (Test 11.11.2026, AllMyPrinters Slicer 1.0.4). Version aus /opt/orcaslicer/VERSION (Container); fehlt sie (Website-Server),
+ * bleibt alles wie bisher.
+ */
+function ps_orca_self_inherit(): bool {
+    static $v = null;
+    if ($v === null) { $ver = trim((string)@file_get_contents(dirname(PS_ORCA, 2) . '/VERSION')); $v = $ver === '' || version_compare($ver, '2.5.0', '<'); }
+    return $v;
+}
+
 function ps_remap_tools(string $gcode, array $tools, bool $pad = false): void {
     $in = fopen($gcode, 'r');
     $out = fopen("$gcode.tmp", 'w');

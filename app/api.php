@@ -127,8 +127,10 @@ function amp_printer(array $r): ?array {
         $i = (int)($s['index'] ?? -1); if ($i < 0 || $i > 255) continue;
         $mat = trim(mb_substr((string)($s['material'] ?? ''), 0, 30)) ?: null;
         $col = preg_match('/^#[0-9a-f]{6}$/i', (string)($s['color'] ?? '')) ? strtolower($s['color']) : null;
-        if ($mat && empty($s['single'])) $has_box = true;
-        if ($mat) $any = true;
+        // filled: Fach belegt, Material unbekannt (Happy Hare/Box Turtle ohne Materialangabe; App ab 0.8.2, 11.11.2026)
+        $filled = $mat || !empty($s['filled']);
+        if ($filled && empty($s['single'])) $has_box = true;
+        if ($filled) $any = true;
         $slots[] = ['index' => $i, 'label' => mb_substr((string)($s['label'] ?? $i + 1), 0, 8), 'material' => $mat, 'color' => $col, 'remain' => null, 'locked' => false];
     }
     $tool0 = $ttg = null;

@@ -1,11 +1,23 @@
 # AllMyPrinters Slicer — OrcaSlicer (CLI) + Slice-Schnittstelle der App AllMyPrinters.
 # Bauen:   docker build -t allmyprinters-slicer .
 # Starten: docker run -d -p 8080:8080 -v amp-slicer:/data --name amp-slicer allmyprinters-slicer
+# Orca 2.5 liefert die Drucker-, Prozess- und Filamentprofile gepackt (.opc) aus; der Slicer liest sie als JSON (Hersteller/
+# machine|process|filament). Dieselben Profile als JSON aus dem Quellcode genau dieser Version holen — Commit fest, git prüft
+# jeden Inhalt gegen seinen Hash. Läuft auf der Bau-Plattform (kein QEMU beim ARM64-Bau).
+FROM --platform=$BUILDPLATFORM alpine:3.20 AS profiles
+ARG ORCA_VERSION=2.5.0
+ARG ORCA_COMMIT=40ecc66f78ed72dc368e0c1ebe40d77f00cc8a19
+RUN apk add --no-cache git \
+ && git clone -q --depth 1 --branch "v${ORCA_VERSION}" --filter=blob:none --sparse https://github.com/OrcaSlicer/OrcaSlicer.git /src \
+ && cd /src && git sparse-checkout set resources/profiles \
+ && test "$(git rev-parse HEAD)" = "$ORCA_COMMIT" \
+ && rm -rf /src/.git
+
 FROM ubuntu:24.04
 
-ARG ORCA_VERSION=2.4.2
-ARG ORCA_SHA256_AMD64=d12fb8c8eac1aecd2dfb6377acd48f994f8fa439ed5292fa532dd82880f029fd
-ARG ORCA_SHA256_ARM64=e1a07275a25f176626c55a5df39e91bc4476d8c28ee4a3192ff758e29dd5c3ba
+ARG ORCA_VERSION=2.5.0
+ARG ORCA_SHA256_AMD64=d13eb0a9cd618ed080ab6b82c64c0a60c4501aac91e88d5ac2c3b526fb141a7c
+ARG ORCA_SHA256_ARM64=00a4fa0a2f9c1649abb8c438b0537ed1e58fed5206faa560c1c0fb4ab225f9cf
 ENV DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 LANG=C.UTF-8
 # Optional näherer Paketspiegel beim Bauen (z. B. --build-arg APT_MIRROR=http://ftp.halifax.rwth-aachen.de/ubuntu)
 ARG APT_MIRROR=
@@ -43,6 +55,7 @@ RUN set -eux; \
     missing="$(LD_LIBRARY_PATH=/opt/orcaslicer/squashfs-root/lib/orca-runtime:/opt/orcaslicer/squashfs-root/bin ldd /opt/orcaslicer/squashfs-root/bin/orca-slicer | grep 'not found' || true)"; \
     if [ -n "$missing" ]; then echo "$missing" >&2; exit 1; fi
 
+COPY --from=profiles /src/resources/profiles/ /opt/orcaslicer/squashfs-root/resources/profiles/
 COPY docker/php.ini /etc/php/8.3/cli/conf.d/99-allmyprinters.ini
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY app/ /app/
