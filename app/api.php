@@ -91,9 +91,10 @@ $a = (string)($_GET['a'] ?? $_POST['a'] ?? '');
 if ($a === 'version') {
     $orca = trim((string)@file_get_contents('/opt/orcaslicer/VERSION')) ?: null;
     // features: was dieser Container kann — die App sagt Selbsthostern, wenn eine ihrer Funktionen einen neueren Container braucht
-    // (multi_start ab 1.0.3: Mehrfarbig für Drucker, deren Startbefehl die Fächer zuordnet — Bambu, Anycubic LAN, Elegoo, Creality, Flashforge)
+    // (multi_start ab 1.0.3: Mehrfarbig für Drucker, deren Startbefehl die Fächer zuordnet — Bambu, Anycubic LAN, Elegoo, Creality, Flashforge;
+    // thumbs ab 1.0.5: Vorschaubilder im G-Code fürs Display des Druckers, Modellbild in der Antwort auf a=job)
     amp_json(['name' => 'allmyprinters-slicer', 'api' => AMP_API, 'version' => AMP_VERSION, 'orca' => $orca, 'limits' => getenv('AMP_LIMITS') === '1',
-              'features' => ['multi_start']]);
+              'features' => ['multi_start', 'thumbs']]);
 }
 
 $dev = strtolower((string)($_SERVER['HTTP_X_AMP_DEVICE'] ?? ''));
@@ -219,6 +220,9 @@ if ($a === 'job' || $a === 'preview' || $a === 'gcode') {
                  'rearranged' => !empty($job['rearranged']), 'x_applied' => count($job['x_applied'] ?? []), 'x_clamped' => $job['x_clamped'] ?? null,
                  'pause' => $job['x']['pause'] ?? [], 'scale' => $job['x']['scale'] ?? 1, 'objs' => array_sum(array_column($job['parts'] ?? [], 'copies')),
                  'files' => count($job['parts'] ?? []), 'plan' => ps_job_paint($job), 'size' => @filesize(ps_job_dir($job['id']) . '/out/plate_1.gcode') ?: null];
+        // Modellbild (1.0.5): klein als WebP für die Druckkarte der App, auf Wunsch als PNG (Bambu: Metadata/plate_1.png im .gcode.3mf)
+        if (is_file("$dir/thumb.webp")) $out['thumb'] = 'data:image/webp;base64,' . base64_encode((string)file_get_contents("$dir/thumb.webp"));
+        if (!empty($in['png']) && is_file("$dir/thumb.png")) $out['thumb_png'] = base64_encode((string)file_get_contents("$dir/thumb.png"));
     }
     amp_json($out);
 }

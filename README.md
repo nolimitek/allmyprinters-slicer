@@ -30,6 +30,9 @@ big multi-color models need more.
 - **OrcaSlicer 2.5.0** (official Linux AppImage, checksum-verified at build time) with all bundled printer, process and filament profiles.
 - The same slicing pipeline the app uses on our server: profile selection per printer, multi-color slot mapping, multi-plate 3MF,
   supports, expert settings, pause at height, G-code preview.
+- Model thumbnails in the G-code header in the sizes and formats the printer profile asks for (PNG, JPG, QOI), so the printer's
+  display, Moonraker and the app show what is printing. OrcaSlicer's command line cannot render them without a screen, the container
+  draws them from the sliced toolpaths.
 - No account, no telemetry. The container never connects anywhere on its own.
 
 ## Settings (environment variables, all optional)

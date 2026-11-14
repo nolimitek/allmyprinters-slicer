@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 79f78ef56d9d2dbe, 2026-11-11 20:36 UTC
- * 59 von 99 Funktionen, 18 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 d730beca4d10d412, 2026-11-14 20:46 UTC
+ * 65 von 105 Funktionen, 18 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -1006,7 +1006,7 @@ function ps_slice(array $job): array {
         if ($f['tool'] !== null && preg_match('/^#[0-9a-f]{6}$/i', $c)) $pal[(int)$f['tool']] = strtolower($c);
     }
     $job['stats'] = ps_preview_build($gcode, "$dir/preview.bin.gz", $m, $pal);
-    try { ps_thumb_build("$dir/preview.bin.gz", "$dir/thumb.webp", $job['slot']['color'] ?? null); } catch (Throwable $e) {}
+    try { ps_thumbs_after_slice($dir, $gcode, $m, $job['slot']['color'] ?? null); } catch (Throwable $e) {}
     return $job;
 }
 
@@ -1408,8 +1408,139 @@ function ps_preview_pack(array $layers, array $bed, float $height, array $colors
  * $color = Fachfarbe (einfarbig); mehrfarbig kommen die Farben aus der Datei.
  */
 function ps_thumb_build(string $src, string $out, ?string $color = null, int $size = 240): bool {
+    $cv = ps_thumb_canvas($src, $color, $size * 2);
+    if (!$cv) return false;
+    $th = ps_thumb_fit($cv, $size, $size, (int)round($size * 0.06));
+    $ok = imagewebp($th, $out . '.tmp', 84) && rename($out . '.tmp', $out);
+    imagedestroy($th); imagedestroy($cv[0]);
+    return $ok;
+}
+
+/**
+ * Nach dem Slicen (14.11.2026, User: „am Display des Druckers sehe ich nicht, was gedruckt wird“): Orca schreibt ohne OpenGL keine
+ * Vorschaubilder in den G-Code — das Display (Kobra, K1/K2, Centauri, U1, Prusa …) und Moonraker hatten nichts zu zeigen.
+ * Einmal rendern, daraus: thumb.webp (Website), thumb.png (App: Druckkarte, Bambu plate_1.png) und die Bilder, die das
+ * Druckerprofil verlangt (thumbnails/thumbnails_format), im Orca-Format im Kopf des G-Codes.
+ */
+function ps_thumbs_after_slice(string $dir, string $gcode, array $m, ?string $color): void {
+    $specs = ps_thumb_specs($m);
+    $max = 256;
+    foreach ($specs as [$w, $h]) $max = max($max, $w, $h);
+    $cv = ps_thumb_canvas("$dir/preview.bin.gz", $color, min(1024, 2 * $max));
+    if (!$cv) return;
+    $im = ps_thumb_fit($cv, 240, 240, 14);
+    if (imagewebp($im, "$dir/thumb.webp.tmp", 84)) rename("$dir/thumb.webp.tmp", "$dir/thumb.webp");
+    imagedestroy($im);
+    $im = ps_thumb_fit($cv, 256, 256, 10);
+    if (imagepng($im, "$dir/thumb.png.tmp", 9)) rename("$dir/thumb.png.tmp", "$dir/thumb.png");
+    imagedestroy($im);
+    if ($specs) ps_gcode_thumbs_insert($gcode, $cv, $specs);
+    imagedestroy($cv[0]);
+}
+
+/**
+ * Vorschaubilder laut Druckerprofil: „230x110/PNG“, [„320x320“, „160x160“], „96x96/PNG, 300x300/PNG“ — ohne Format gilt thumbnails_format
+ * (sonst PNG). Nur PNG, JPG und QOI; COLPIC (Qidi, ältere Elegoo) und BTT_TFT fehlen — die Qidi-Profile verlangen zusätzlich PNG.
+ * @return list<array{int, int, string}>
+ */
+function ps_thumb_specs(array $m): array {
+    $t = $m['thumbnails'] ?? '';
+    $t = is_array($t) ? implode(',', $t) : (string)$t;
+    $df = $m['thumbnails_format'] ?? '';
+    $df = strtoupper(trim(is_array($df) ? (string)($df[0] ?? '') : (string)$df)) ?: 'PNG';
+    $out = [];
+    foreach (preg_split('/[,;]/', $t) as $e) {
+        if (!preg_match('~^\s*(\d+)\s*x\s*(\d+)\s*(?:/\s*([A-Za-z_]+))?\s*$~', $e, $mm)) continue;
+        [$w, $h, $f] = [(int)$mm[1], (int)$mm[2], strtoupper($mm[3] ?? '') ?: $df];
+        if ($w < 8 || $h < 8 || $w > 1024 || $h > 1024 || !in_array($f, ['PNG', 'JPG', 'QOI'], true)) continue;
+        $out[] = [$w, $h, $f];
+    }
+    return array_slice($out, 0, 8);
+}
+
+/** Belegten Bereich der Leinwand (ps_thumb_canvas) mittig in ein Bild $w × $h einpassen, Rand $pad px; $bg = [r, g, b] statt transparent (JPG). */
+function ps_thumb_fit(array $cv, int $w, int $h, int $pad = 0, ?array $bg = null): GdImage {
+    [$im, [$x0, $y0, $x1, $y1]] = $cv;
+    $cw = $x1 - $x0 + 1; $ch = $y1 - $y0 + 1;
+    $k = min(max(1, $w - 2 * $pad) / $cw, max(1, $h - 2 * $pad) / $ch);
+    $dw = max(1, (int)round($cw * $k)); $dh = max(1, (int)round($ch * $k));
+    $out = imagecreatetruecolor($w, $h);
+    if ($bg) { imagefill($out, 0, 0, imagecolorallocate($out, $bg[0], $bg[1], $bg[2])); imagealphablending($out, true); }
+    else { imagealphablending($out, false); imagesavealpha($out, true); imagefill($out, 0, 0, imagecolorallocatealpha($out, 0, 0, 0, 127)); }
+    imagecopyresampled($out, $im, intdiv($w - $dw, 2), intdiv($h - $dh, 2), $x0, $y0, $dw, $dh, $cw, $ch);
+    return $out;
+}
+
+/** QOI (qoiformat.org, Prusa-Displays): RGBA, Pixel für Pixel wie der Referenz-Encoder. */
+function ps_qoi_encode(GdImage $im): string {
+    $w = imagesx($im); $h = imagesy($im);
+    $out = 'qoif' . pack('NN', $w, $h) . "\x04\x00";
+    $idx = array_fill(0, 64, 0);
+    $pr = $pg = $pb = 0; $pa = 255; $run = 0; $n = 0; $end = $w * $h;
+    $s8 = fn(int $v): int => (($v + 128) & 255) - 128;
+    for ($y = 0; $y < $h; $y++) for ($x = 0; $x < $w; $x++) {
+        $c = imagecolorat($im, $x, $y); $n++;
+        $a = 255 - (int)round((($c >> 24) & 127) * 255 / 127);
+        [$r, $g, $b] = $a === 0 ? [0, 0, 0] : [($c >> 16) & 255, ($c >> 8) & 255, $c & 255];
+        if ($r === $pr && $g === $pg && $b === $pb && $a === $pa) {
+            if (++$run === 62 || $n === $end) { $out .= chr(0xc0 | ($run - 1)); $run = 0; }
+            continue;
+        }
+        if ($run) { $out .= chr(0xc0 | ($run - 1)); $run = 0; }
+        $hi = ($r * 3 + $g * 5 + $b * 7 + $a * 11) % 64; $key = ($r << 24) | ($g << 16) | ($b << 8) | $a;
+        if ($idx[$hi] === $key) $out .= chr($hi);
+        else {
+            $idx[$hi] = $key;
+            if ($a === $pa) {
+                $vr = $s8($r - $pr); $vg = $s8($g - $pg); $vb = $s8($b - $pb); $vgr = $s8($vr - $vg); $vgb = $s8($vb - $vg);
+                if ($vr > -3 && $vr < 2 && $vg > -3 && $vg < 2 && $vb > -3 && $vb < 2) $out .= chr(0x40 | (($vr + 2) << 4) | (($vg + 2) << 2) | ($vb + 2));
+                elseif ($vgr > -9 && $vgr < 8 && $vg > -33 && $vg < 32 && $vgb > -9 && $vgb < 8) $out .= chr(0x80 | ($vg + 32)) . chr((($vgr + 8) << 4) | ($vgb + 8));
+                else $out .= "\xfe" . chr($r) . chr($g) . chr($b);
+            } else $out .= "\xff" . chr($r) . chr($g) . chr($b) . chr($a);
+        }
+        $pr = $r; $pg = $g; $pb = $b; $pa = $a;
+    }
+    return $out . "\0\0\0\0\0\0\0\1";
+}
+
+/**
+ * Vorschaubilder in den G-Code-Kopf, wie Orca sie schreibt (GCodeThumbnails: hinter „; HEADER_BLOCK_END“, Base64 in Zeilen zu 78 Zeichen,
+ * „thumbnail“ = PNG, „thumbnail_JPG“, „thumbnail_QOI“). Hat die Datei schon welche, bleibt sie, wie sie ist.
+ */
+function ps_gcode_thumbs_insert(string $gcode, array $cv, array $specs): bool {
+    $fh = @fopen($gcode, 'rb');
+    if (!$fh) return false;
+    $head = (string)fread($fh, 65536);
+    $p = strpos($head, "; HEADER_BLOCK_END\n");
+    if ($p === false || preg_match('/^; thumbnail(_[A-Z]+)? begin /m', $head)) { fclose($fh); return false; }
+    $p += 19;
+    if (($head[$p] ?? '') === "\n") $p++;
+    $blk = '';
+    foreach ($specs as [$w, $h, $f]) {
+        $im = ps_thumb_fit($cv, $w, $h, min($w, $h) >= 64 ? (int)round(min($w, $h) * 0.04) : 0, $f === 'JPG' ? [0, 0, 0] : null);
+        if ($f === 'QOI') $data = ps_qoi_encode($im);
+        else { ob_start(); $f === 'JPG' ? imagejpeg($im, null, 85) : imagepng($im, null, 9); $data = (string)ob_get_clean(); }
+        imagedestroy($im);
+        $b = base64_encode($data); $tag = $f === 'PNG' ? 'thumbnail' : 'thumbnail_' . $f;
+        $blk .= "; THUMBNAIL_BLOCK_START\n\n;\n; $tag begin {$w}x{$h} " . strlen($b) . "\n";
+        foreach (str_split($b, 78) as $ln) $blk .= "; $ln\n";
+        $blk .= "; $tag end\n; THUMBNAIL_BLOCK_END\n\n";
+    }
+    $tmp = $gcode . '.thumbs';
+    $out = @fopen($tmp, 'wb');
+    if (!$out) { fclose($fh); return false; }
+    $ok = fwrite($out, substr($head, 0, $p) . $blk . substr($head, $p)) !== false && stream_copy_to_stream($fh, $out) !== false;
+    fclose($fh); $ok = fclose($out) && $ok;
+    if (!$ok || filesize($tmp) < filesize($gcode)) { @unlink($tmp); return false; }
+    return rename($tmp, $gcode);
+}
+
+/**
+ * Leinwand $S × $S (transparent) mit dem Modell, wie ps_thumb_build es zeigt, und dem belegten Bereich [x0, y0, x1, y1] — oder null.
+ */
+function ps_thumb_canvas(string $src, ?string $color, int $S): ?array {
     $raw = @gzdecode((string)@file_get_contents($src));
-    if (!$raw || strncmp($raw, 'PSV3', 4) !== 0) return false;
+    if (!$raw || strncmp($raw, 'PSV3', 4) !== 0) return null;
     $hd = unpack('gox/goy/gh/Vnbed', $raw, 4);
     $o = 20 + 8 * $hd['nbed'];
     $nc = ord($raw[$o++]);
@@ -1440,7 +1571,7 @@ function ps_thumb_build(string $src, string $out, ?string $color = null, int $si
         }
         $zs[] = $z;
     }
-    if (!$polys) return false;
+    if (!$polys) return null;
     // Schichthöhe (für die Höhe einer Bahn im Bild): Median der Abstände
     $d = []; for ($i = 1; $i < count($zs); $i++) if ($zs[$i] > $zs[$i - 1]) $d[] = $zs[$i] - $zs[$i - 1];
     sort($d); $lh = $d ? $d[intdiv(count($d), 2)] : 2.0;
@@ -1454,7 +1585,7 @@ function ps_thumb_build(string $src, string $out, ?string $color = null, int $si
         if ($xr < $minx) $minx = $xr; if ($xr > $maxx) $maxx = $xr;
         if ($sy < $miny) $miny = $sy; if ($sy + $lh * $ce > $maxy) $maxy = $sy + $lh * $ce;
     }
-    $S = $size * 2; $pad = $S * 0.06;
+    $pad = $S * 0.06;
     $k = ($S - 2 * $pad) / max(1, $maxx - $minx, $maxy - $miny);
     $offx = ($S - ($maxx - $minx) * $k) / 2 - $minx * $k; $offy = ($S - ($maxy - $miny) * $k) / 2 - $miny * $k;
     $r = max(0, (int)floor(2.2 * $k));               // halbe Bahnbreite (0,45 mm) in Pixeln
@@ -1500,20 +1631,17 @@ function ps_thumb_build(string $src, string $out, ?string $color = null, int $si
     $im = imagecreatetruecolor($S, $S);
     imagealphablending($im, false); imagesavealpha($im, true);
     imagefill($im, 0, 0, imagecolorallocatealpha($im, 0, 0, 0, 127));
+    $bx0 = $by0 = $S; $bx1 = $by1 = 0;
     foreach ($px as $q => $rgb) {
         $x = $q % $S; $y = intdiv($q, $S); $dz = $zb[$q];
+        if ($x < $bx0) $bx0 = $x; if ($x > $bx1) $bx1 = $x; if ($y < $by0) $by0 = $y; if ($y > $by1) $by1 = $y;
         $edge = false;
         foreach ([$q - 1, $q + 1, $q - $S, $q + $S] as $nq) if (!isset($px[$nq]) || $zb[$nq] - $dz > 20) { $edge = true; break; }
         if ($edge) $rgb = ((int)((($rgb >> 16) & 255) * .62) << 16) | ((int)((($rgb >> 8) & 255) * .62) << 8) | (int)(($rgb & 255) * .62);
         imagesetpixel($im, $x, $y, $rgb);
     }
-    $th = imagecreatetruecolor($size, $size);
-    imagealphablending($th, false); imagesavealpha($th, true);
-    imagefill($th, 0, 0, imagecolorallocatealpha($th, 0, 0, 0, 127));
-    imagecopyresampled($th, $im, 0, 0, 0, 0, $size, $size, $S, $S);
-    $ok = imagewebp($th, $out . '.tmp', 84) && rename($out . '.tmp', $out);
-    imagedestroy($im); imagedestroy($th);
-    return $ok;
+    if (!$px) { imagedestroy($im); return null; }
+    return [$im, [$bx0, $by0, $bx1, $by1]];
 }
 
 /**
@@ -1736,7 +1864,7 @@ function ps_gcode_prepare(array $job): array {
     $t = $job['gcode']['tools'] ?? [];
     if (count($t) === 1 && (int)$t[0] !== 0) ps_remap_tools($gcode, [(int)$t[0] => [0, '']]);
     if (isset($job['tool'])) {
-        if (!empty($job['printer']['cfs']) && preg_match('/^T0\b/m', (string)file_get_contents($gcode, false, null, 0, 65536)))
+        if (!empty($job['printer']['cfs']) && preg_match('/^T0\b/m', (string)file_get_contents($gcode, false, null, 0, 1048576)))
             ps_remap_tools($gcode, [0 => [(int)$job['tool'], (string)$job['slot']['label']]]);
         else ps_insert_toolchange($gcode, (int)$job['tool'], (string)$job['slot']['label']);
     }
