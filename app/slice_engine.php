@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 77857d5c057475b7, 2026-11-15 14:59 UTC
- * 66 von 106 Funktionen, 18 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 ddeae9954dfc09db, 2026-11-15 20:04 UTC
+ * 69 von 109 Funktionen, 19 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -56,6 +56,9 @@ const PS_X_PROC = [
     'brim_type' => ['e', ['auto_brim', 'outer_only', 'inner_only', 'outer_and_inner', 'brim_ears', 'no_brim']],
     'brim_width' => ['f', 0, 30], 'skirt_loops' => ['i', 0, 10],
 ];
+// Temperatur (15.11.2026, Community-Wünsche „Set nozzle and bed temperature“): überschreibt das Filamentprofil — gilt für alle
+// Filamente des Drucks. Leer = aus dem Profil. Düse auch für die Stahl-/Messing-Varianten (Orca 2.5: nozzle_temperature_HS/_BRASS).
+const PS_X_FIL = ['nozzle_temperature' => ['i', 150, 350], 'nozzle_temperature_initial_layer' => ['i', 150, 350], 'bed_temperature' => ['i', 0, 130]];
 const PS_STL_MAX = 20;
 // STL-Dateien je Platte (PHP max_file_uploads = 20)
 const PS_STL_MAX_OBJS = 200;
@@ -140,6 +143,10 @@ function ps_flatten(string $vendor, string $kind, string $name, array $over = []
     }
     $res = [];
     foreach (array_reverse($chain) as $d) $res = array_merge($res, $d);
+    // „nil“ ist bei den Rückzugs-Überschreibungen der Filamente gültig (= Wert des Druckers), bei diesen beiden nicht: Anycubic
+    // Kobra S1 Max 0.6/0.8 (46 Profile) → CLI „filament_flush_temp: nil not in range“, rc -18 (15.11.2026). Weglassen = Orca-Standard.
+    foreach (['filament_flush_temp', 'filament_flush_volumetric_speed'] as $k)
+        if (isset($res[$k]) && ($res[$k] === 'nil' || (is_array($res[$k]) && in_array('nil', $res[$k], true)))) unset($res[$k]);
     unset($res['inherits']);
     $res['from'] = 'User';
     if ($kind !== 'machine') { $res['compatible_printers'] = []; $res['compatible_printers_condition'] = ''; }
@@ -205,11 +212,81 @@ function ps_machine_list(): array {
     return $out;
 }
 
+/**
+ * Düsengrößen, für die es dieses Druckermodell als Orca-Profil gibt (15.11.2026, Wunsch Denny: 0,6 mm am Kobra S1 Max).
+ * „Anycubic Kobra S1 Max 0.4 nozzle“ → 0.25/0.4/0.6/0.8; „Creality K1 (0.4 nozzle)“ → … (0.6 nozzle). Nur instanzierbare Profile.
+ * Rückgabe [['d' => 0.6, 'machine' => Name, 'lh' => [min, max]], …] aufsteigend; ohne Größe im Namen: leer.
+ */
+function ps_machine_nozzles(?string $vendor, ?string $machine): array {
+    static $cache = [];
+    if (!$vendor || !$machine) return [];
+    $re = '/^(.*?)\s*\(?(\d+(?:\.\d+)?) ?nozzle\)?$/i';
+    if (!preg_match($re, $machine, $mm)) return [];
+    $k = "$vendor|$machine";
+    if (isset($cache[$k])) return $cache[$k];
+    $out = [];
+    foreach (ps_profile_meta($vendor, 'machine') as $n => $e) {
+        if (!$e['inst'] || !preg_match($re, $n, $x) || strcasecmp(trim($x[1]), trim($mm[1])) !== 0) continue;
+        $d = round((float)$x[2], 2);
+        if ($d <= 0 || isset($out[(string)$d])) continue;
+        $out[(string)$d] = ['d' => $d, 'machine' => $n, 'lh' => ps_machine_caps($vendor, $n)['lh']];
+    }
+    usort($out, fn($a, $b) => $a['d'] <=> $b['d']);
+    return $cache[$k] = $out;
+}
+
+/**
+ * Platzhalter der Experten-Einstellungen (print_xdef auf 3DSEARCH, xdef im Container): Prozesswerte des Profils für diese Düse,
+ * dazu die Temperaturen des Filamentprofils für das gewählte Material und die Platte. Rückgabe ['vals' => …, 'caps' => …].
+ */
+function ps_xdef(string $vendor, string $machine, string $nozzle = '', string $material = '', string $bed = 'textured'): array {
+    if ($nozzle !== '' && ($var = ps_nozzle_variant($vendor, $machine, $nozzle))) $machine = $var;
+    $vals = [];
+    try {
+        $pr = ps_flatten($vendor, 'process', ps_process_for($vendor, $machine));
+        foreach (array_keys(PS_X_PROC) as $k) if (isset($pr[$k]) && !is_array($pr[$k])) $vals[$k] = (string)$pr[$k];
+        if (($pr['support_style'] ?? '') === 'organic' && ($vals['support_type'] ?? '') === 'tree(auto)') $vals['support_type'] = 'organic';
+    } catch (Throwable $e) { /* ohne Platzhalter */ }
+    if ($material !== '' && mb_strlen($material) <= 30) {
+        try {
+            $prof = ps_filament_for($vendor, $machine, $material);
+            [$fv, $fname] = str_contains($prof, '|') ? explode('|', $prof, 2) : [$vendor, $prof];
+            $f = ps_flatten($fv, 'filament', $fname);
+            $one = fn($k) => ($x = ((array)($f[$k] ?? []))[0] ?? null) !== null && is_numeric($x) ? (string)(int)$x : null;
+            foreach (['nozzle_temperature', 'nozzle_temperature_initial_layer'] as $k) if (($x = $one($k)) !== null) $vals[$k] = $x;
+            if (($x = $one($bed === 'smooth' ? 'hot_plate_temp' : 'textured_plate_temp')) !== null && $x !== '0') $vals['bed_temperature'] = $x;
+        } catch (Throwable $e) { /* ohne Temperatur-Platzhalter */ }
+    }
+    return ['vals' => $vals, 'caps' => ps_machine_caps($vendor, $machine)];
+}
+
+/** Maschinenprofil für diese Düse (gleiches Modell) oder null. */
+function ps_nozzle_variant(?string $vendor, ?string $machine, $d): ?string {
+    if (!is_numeric($d)) return null;
+    foreach (ps_machine_nozzles($vendor, $machine) as $n) if (abs($n['d'] - (float)$d) < 0.001) return $n['machine'];
+    return null;
+}
+
 function ps_process_for(string $vendor, string $machine): string {
     $cands = ps_profiles_for($vendor, 'process', $machine);
-    foreach (['0.20mm Standard', '0.20mm'] as $pre) {
+    // Andere Düse als 0,4 mm (15.11.2026): Schichthöhe nahe der halben Düse (0,6 → 0,30 mm, 0,8 → 0,40, 0,2 → 0,10), lieber
+    // „Standard“ — vorher nahm der erste Treffer die feinste Schicht (0,6 mm-Düse mit 0,18 mm)
+    $nd = 0.4;
+    try { $nd = (float)(((array)(ps_flatten($vendor, 'machine', $machine)['nozzle_diameter'] ?? [0.4]))[0] ?? 0.4); } catch (Throwable $e) {}
+    if (abs($nd - 0.4) < 0.001) foreach (['0.20mm Standard', '0.20mm'] as $pre) {
         // „SOLUBLE“ (Prusa) ist für wasserlösliches Stützmaterial, nie als Vorgabe — bei MK4S/CORE One wird es so „0.20mm SPEED“
         foreach ($cands as $n) if (str_starts_with($n, $pre) && stripos($n, 'SOLUBLE') === false) return $n;
+    }
+    // Sonst (andere Düse, oder Namen ohne „mm“ wie Snapmaker „0.20 Standard“ — dort kam bis 15.11. „0.08 Extra Fine“):
+    // Schicht nahe der halben Düse, „Standard“ bevorzugt
+    if ($nd > 0) {
+        $best = null; $bs = INF;
+        foreach ($cands as $n) {
+            if (stripos($n, 'SOLUBLE') !== false || !preg_match('/^(\d+\.\d+)/', $n, $x)) continue;
+            $sc = abs((float)$x[1] - $nd / 2) + (stripos($n, 'Standard') !== false ? 0 : 0.02);
+            if ($sc < $bs - 1e-9) { $bs = $sc; $best = $n; }
+        }
+        if ($best !== null) return $best;
     }
     if (!$cands) throw new RuntimeException("Kein Prozessprofil für $machine");
     return $cands[0];
@@ -267,7 +344,14 @@ function ps_machine_caps(?string $vendor, ?string $machine): array {
 function ps_x_clean(array $raw, string $ext): array|string {
     $num = fn($v) => is_numeric($v = str_replace(',', '.', trim((string)$v))) ? (float)$v : null;
     $fmt = fn(float $v) => rtrim(rtrim(sprintf('%.3F', $v), '0'), '.');
-    $x = ['proc' => [], 'orient' => true, 'rot' => false, 'scale' => 1.0, 'pause' => []];
+    $x = ['proc' => [], 'fil' => [], 'orient' => true, 'rot' => false, 'scale' => 1.0, 'pause' => []];
+    foreach (PS_X_FIL as $k => $d) {
+        $v = trim((string)($raw[$k] ?? ''));
+        if ($v === '') continue;
+        $n = $num($v);
+        if ($n === null || $n < $d[1] || $n > $d[2]) return 'x_bad';
+        $x['fil'][$k] = (int)round($n);
+    }
     foreach (PS_X_PROC as $k => $d) {
         $v = trim((string)($raw[$k] ?? ''));
         if ($v === '') continue;
@@ -590,6 +674,13 @@ function ps_job_create(PDO $pdo, int $uid, array $printer, array $upload, array 
     if (!in_array($ext, ['stl', '3mf'], true) && !$is_gc) return 'type';
     if (empty($printer['can_print'])) return 'provider';
     if (!$printer['machine'] && !$is_gc) return 'no_profile';   // eigener G-Code braucht kein Slicerprofil
+    // Düse (15.11.2026): gleiches Modell mit anderer Düsengröße — nur Größen, die es als Orca-Profil gibt
+    if (!$is_gc && ($nz = trim((string)($opt['nozzle'] ?? ''))) !== '') {
+        $var = ps_nozzle_variant($printer['vendor'], $printer['machine'], $nz);
+        if ($var === null) return 'nozzle';
+        $printer['machine'] = $var;
+        $printer['caps'] = ps_machine_caps($printer['vendor'], $var);
+    }
     $slot = null;
     if ($printer['slot_mode'] === 'material') {
         // Drucker meldet keine Fächer: nur das Material (für Filamentprofil und Temperaturen)
@@ -875,12 +966,32 @@ function ps_slice(array $job): array {
     $job['x_applied'] = $applied;
     $p = ps_flatten($v, 'process', $process, $pover);
     // Filamentprofil aus dem Fach; Farbe des Fachs in den G-Code (Creality CFS und die Anycubic-Cloud gleichen danach ab)
-    $fil_json = function (array $slot, string $file, string $suffix = '') use ($v, $machine): string {
+    $xf = $xo['fil'] ?? [];
+    foreach (array_keys($xf) as $k) $applied[] = $k;
+    $job['x_applied'] = $applied;
+    $fil_json = function (array $slot, string $file, string $suffix = '') use ($v, $machine, $xf): string {
         $prof = ps_filament_for($v, $machine, (string)$slot['material']);
         [$fv, $fname] = str_contains($prof, '|') ? explode('|', $prof, 2) : [$v, $prof];
         $fover = ['compatible_printers' => [$machine]];
         if (!empty($slot['color']) && preg_match('/^#[0-9a-f]{6}$/i', $slot['color'])) $fover['filament_colour'] = [strtoupper($slot['color'])];
         $f = ps_flatten($fv, 'filament', $fname, $fover);
+        // Temperatur aus den Experten-Einstellungen (15.11.2026): Düse samt Stahl-/Messing-Varianten, Bereich mitziehen
+        // (sonst warnt Orca „außerhalb des empfohlenen Bereichs“), Bett für jede Platte, die das Profil kennt (0 = Platte nicht geeignet)
+        foreach (['nozzle_temperature' => ['nozzle_temperature', 'nozzle_temperature_BRASS', 'nozzle_temperature_HS'],
+                  'nozzle_temperature_initial_layer' => ['nozzle_temperature_initial_layer', 'nozzle_temperature_initial_layer_BRASS', 'nozzle_temperature_initial_layer_HS']] as $xk => $keys) {
+            if (!isset($xf[$xk])) continue;
+            foreach ($keys as $fk) if ($fk === $xk || isset($f[$fk])) $f[$fk] = [(string)$xf[$xk]];
+        }
+        foreach (['nozzle_temperature', 'nozzle_temperature_initial_layer'] as $xk) {
+            if (!isset($xf[$xk])) continue;
+            $lo = (int)(((array)($f['nozzle_temperature_range_low'] ?? []))[0] ?? 0); $hi = (int)(((array)($f['nozzle_temperature_range_high'] ?? []))[0] ?? 0);
+            if ($lo && $xf[$xk] < $lo) $f['nozzle_temperature_range_low'] = [(string)$xf[$xk]];
+            if ($hi && $xf[$xk] > $hi) $f['nozzle_temperature_range_high'] = [(string)$xf[$xk]];
+        }
+        if (isset($xf['bed_temperature'])) {
+            foreach ($f as $fk => $fv_) if (preg_match('/_plate_temp(_initial_layer)?$/', $fk) && (string)(((array)$fv_)[0] ?? '0') !== '0') $f[$fk] = [(string)$xf['bed_temperature']];
+            foreach (['hot_plate_temp', 'hot_plate_temp_initial_layer', 'textured_plate_temp', 'textured_plate_temp_initial_layer'] as $fk) $f[$fk] = [(string)$xf['bed_temperature']];
+        }
         if ($suffix !== '') $f['name'] = ($f['name'] ?? $fname) . $suffix;   // gleiche Namen mehrfach mag Orca nicht
         file_put_contents($file, json_encode($f, JSON_UNESCAPED_SLASHES));
         return $prof;

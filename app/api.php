@@ -94,7 +94,7 @@ if ($a === 'version') {
     // (multi_start ab 1.0.3: Mehrfarbig für Drucker, deren Startbefehl die Fächer zuordnet — Bambu, Anycubic LAN, Elegoo, Creality, Flashforge;
     // thumbs ab 1.0.5: Vorschaubilder im G-Code fürs Display des Druckers, Modellbild in der Antwort auf a=job)
     amp_json(['name' => 'allmyprinters-slicer', 'api' => AMP_API, 'version' => AMP_VERSION, 'orca' => $orca, 'limits' => getenv('AMP_LIMITS') === '1',
-              'features' => ['multi_start', 'thumbs']]);
+              'features' => ['multi_start', 'thumbs', 'nozzle_temp']]);   // nozzle_temp: Düsengröße + Temperatur (1.0.7)
 }
 
 $dev = strtolower((string)($_SERVER['HTTP_X_AMP_DEVICE'] ?? ''));
@@ -163,19 +163,16 @@ if ($a === 'printer_info') {
         : ps_machine_for('moonraker', mb_substr((string)($in['model'] ?? ''), 0, 80));
     amp_json(['vendor' => $prof[0] ?? null, 'machine' => $prof[1] ?? null, 'exact' => $prof[2] ?? false,
               'switches_by_t' => $prof ? ps_machine_switches_by_t($prof[0], $prof[1]) : null,
-              'caps' => $prof ? ps_machine_caps($prof[0], $prof[1]) : null, 'materials' => PS_MATERIALS]);
+              'caps' => $prof ? ps_machine_caps($prof[0], $prof[1]) : null, 'materials' => PS_MATERIALS,
+              'nozzles' => $prof ? ps_machine_nozzles($prof[0], $prof[1]) : []]);   // Düsengrößen mit Orca-Profil (1.0.7)
 }
 
 if ($a === 'xdef') {
     $v = (string)($in['vendor'] ?? ''); $m = (string)($in['machine'] ?? '');
     if (!in_array($v, ps_vendors(), true) || !isset(ps_profile_index($v, 'machine')[$m])) amp_json(['vals' => (object)[]]);
-    $vals = [];
-    try {
-        $pr = ps_flatten($v, 'process', ps_process_for($v, $m));
-        foreach (array_keys(PS_X_PROC) as $k) if (isset($pr[$k]) && !is_array($pr[$k])) $vals[$k] = (string)$pr[$k];
-        if (($pr['support_style'] ?? '') === 'organic' && ($vals['support_type'] ?? '') === 'tree(auto)') $vals['support_type'] = 'organic';
-    } catch (Throwable $e) { /* ohne Platzhalter */ }
-    amp_json(['vals' => (object)$vals, 'caps' => ps_machine_caps($v, $m)]);
+    // Düse + Material + Platte (1.0.7): Prozesswerte der Düse, Temperaturen des Filamentprofils
+    $r = ps_xdef($v, $m, mb_substr((string)($in['nozzle'] ?? ''), 0, 6), mb_substr((string)($in['material'] ?? ''), 0, 30), (string)($in['bed'] ?? 'textured'));
+    amp_json(['vals' => (object)$r['vals'], 'caps' => $r['caps']]);
 }
 
 if ($a === 'job' || $a === 'preview' || $a === 'gcode') {
@@ -256,7 +253,8 @@ if ($a === 'slice') {
     $r = ps_job_create(new PDO('sqlite::memory:'), $uid, $printer, $main, ['slot' => (int)($in['slot'] ?? -1), 'bed' => $in['bed'] ?? 'textured', 'level' => '',
         'plate' => (int)($in['plate'] ?? 1), 'skip' => (string)($in['skip'] ?? ''), 'arrange' => !empty($in['arrange']), 'supports' => $sup === 'on',
         'supports_project' => $sup === 'project', 'material' => (string)($in['material'] ?? ''), 'more' => $ups,
-        'copies' => is_array($in['copies'] ?? null) ? $in['copies'] : [], 'fslot' => is_array($in['fslot'] ?? null) ? $in['fslot'] : [], 'x' => $x]);
+        'copies' => is_array($in['copies'] ?? null) ? $in['copies'] : [], 'fslot' => is_array($in['fslot'] ?? null) ? $in['fslot'] : [], 'x' => $x,
+        'nozzle' => mb_substr((string)($in['nozzle'] ?? ''), 0, 6)]);
     if (is_string($r)) { amp_log($dev, 'slice_err', $r); amp_json(['error' => $r]); }
     $r['amp_dev'] = $dev;
     if ($sup === 'project' && $r['info3mf']) $r['supports'] = !empty($r['info3mf']['supports']) || !empty($r['info3mf']['painted']);
