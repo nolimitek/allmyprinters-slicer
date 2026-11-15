@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 d730beca4d10d412, 2026-11-14 20:46 UTC
- * 65 von 105 Funktionen, 18 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 77857d5c057475b7, 2026-11-15 14:59 UTC
+ * 66 von 106 Funktionen, 18 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -69,7 +69,8 @@ function ps_profile_index(string $vendor, string $kind): array {
     return array_map(fn($e) => $e['file'], ps_profile_meta($vendor, $kind));
 }
 
-/** Name => [file, compat]; compat = compatible_printers des Profils selbst (nicht geerbt). */
+/** Name => [file, compat, cond, inst]; compat = compatible_printers des Profils selbst (nicht geerbt),
+ *  cond = compatible_printers_condition (Prusa ordnet so zu, 15.11.2026), inst = instantiation != "false". */
 function ps_profile_meta(string $vendor, string $kind): array {
     static $cache = [];
     $key = "$vendor/$kind";
@@ -79,7 +80,8 @@ function ps_profile_meta(string $vendor, string $kind): array {
     // ohne sie scheiterte jeder Drucker ohne eigene Filamente (Voron & Co.) mit „Profil fehlt: filament/fdm_filament_pla“
     foreach (array_merge(glob(PS_PROFILES . '/' . $vendor . '/' . $kind . '/*.json') ?: [], glob(PS_PROFILES . '/' . $vendor . '/' . $kind . '/*/*.json') ?: []) as $f) {
         $d = json_decode((string)file_get_contents($f), true);
-        if (!empty($d['name']) && !isset($idx[$d['name']])) $idx[$d['name']] = ['file' => $f, 'compat' => (array)($d['compatible_printers'] ?? [])];
+        if (!empty($d['name']) && !isset($idx[$d['name']])) $idx[$d['name']] = ['file' => $f, 'compat' => (array)($d['compatible_printers'] ?? []),
+            'cond' => trim((string)($d['compatible_printers_condition'] ?? '')), 'inst' => ($d['instantiation'] ?? 'true') !== 'false'];
     }
     return $cache[$key] = $idx;
 }
@@ -87,10 +89,43 @@ function ps_profile_meta(string $vendor, string $kind): array {
 /** Profile eines Typs, die zur Maschine passen (Anycubic benennt uneinheitlich: „@Kobra X“ vs. „@Kobra 3 0.4 nozzle“). */
 function ps_profiles_for(string $vendor, string $kind, string $machine): array {
     $out = [];
+    $mach = null;
     foreach (ps_profile_meta($vendor, $kind) as $n => $e) {
-        if (in_array($machine, $e['compat'], true) || str_ends_with($n, "@$machine")) $out[] = $n;
+        if (in_array($machine, $e['compat'], true) || str_ends_with($n, "@$machine")) { $out[] = $n; continue; }
+        // Prusa (MK4S, CORE One …): keine Druckerliste, sondern eine Bedingung über das Maschinenprofil (15.11.2026, vorher „Kein Prozessprofil“)
+        if (!$e['compat'] && $e['cond'] !== '' && $e['inst']) {
+            $mach ??= (function () use ($vendor, $machine) { try { return ps_flatten($vendor, 'machine', $machine); } catch (Throwable $x) { return []; } })();
+            if ($mach && ps_cond_match($e['cond'], $mach)) $out[] = $n;
+        }
     }
     return $out;
+}
+
+/**
+ * compatible_printers_condition auswerten — so weit, wie es in den Orca-Profilen vorkommt (geprüft 15.11.2026, nur Prusa/process):
+ * printer_notes=~/re/, printer_notes!~/re/, nozzle_diameter[0]==0.4 (auch !=), single_extruder_multi_material (auch !…), mit „and“ verknüpft.
+ * Unbekannte Form (or, Klammern, Vergleiche mit Text) → false: lieber kein Profil als ein falsches.
+ */
+function ps_cond_match(string $cond, array $m): bool {
+    if (preg_match('/\bor\b|[()]/', $cond)) return false;
+    foreach (preg_split('/\s+and\s+/', trim($cond)) as $c) {
+        $c = trim($c);
+        if (preg_match('@^(\w+)\s*(=~|!~)\s*/(.*)/$@', $c, $x)) {
+            $v = $m[$x[1]] ?? '';
+            $v = is_array($v) ? implode("\n", $v) : (string)$v;
+            $hit = @preg_match('~' . str_replace('~', '\~', $x[3]) . '~s', $v);
+            if ($hit === false || ($x[2] === '=~') !== ($hit === 1)) return false;
+        } elseif (preg_match('~^(\w+)\[(\d+)\]\s*(==|!=)\s*([0-9.]+)$~', $c, $x)) {
+            $a = (array)($m[$x[1]] ?? []);
+            $eq = abs((float)($a[(int)$x[2]] ?? $a[0] ?? -1) - (float)$x[4]) < 1e-6;
+            if (($x[3] === '==') !== $eq) return false;
+        } elseif (preg_match('~^(!?)(\w+)$~', $c, $x)) {
+            $b = $m[$x[2]] ?? '0';
+            $on = in_array(is_array($b) ? (string)($b[0] ?? '0') : (string)$b, ['1', 'true'], true);
+            if (($x[1] === '!') === $on) return false;
+        } else return false;
+    }
+    return true;
 }
 
 /** Profil mit aufgelöster inherits-Kette, als „User“-Profil. */
@@ -173,7 +208,8 @@ function ps_machine_list(): array {
 function ps_process_for(string $vendor, string $machine): string {
     $cands = ps_profiles_for($vendor, 'process', $machine);
     foreach (['0.20mm Standard', '0.20mm'] as $pre) {
-        foreach ($cands as $n) if (str_starts_with($n, $pre)) return $n;
+        // „SOLUBLE“ (Prusa) ist für wasserlösliches Stützmaterial, nie als Vorgabe — bei MK4S/CORE One wird es so „0.20mm SPEED“
+        foreach ($cands as $n) if (str_starts_with($n, $pre) && stripos($n, 'SOLUBLE') === false) return $n;
     }
     if (!$cands) throw new RuntimeException("Kein Prozessprofil für $machine");
     return $cands[0];
