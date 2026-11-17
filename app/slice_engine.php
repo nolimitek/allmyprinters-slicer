@@ -1,7 +1,7 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 ddeae9954dfc09db, 2026-11-15 20:04 UTC
+ * Quelle: print_slice_lib.php, sha256 2bc2560d1e80c76e, 2026-11-17 12:13 UTC
  * 69 von 109 Funktionen, 19 Konstanten.
  */
 
@@ -141,13 +141,24 @@ function ps_flatten(string $vendor, string $kind, string $name, array $over = []
         $chain[] = $d;
         $n = (string)($d['inherits'] ?? '');
     }
+    // Orca ab 2.5: „include“ = Vorlagen auf derselben Stufe, die eigenen Werte des Profils gehen vor. Bambu legt Start-, End-,
+    // Wechsel-, Schicht- und Zeitraffer-G-Code je Drucker in solche Dateien („… template machine_start_gcode“), Filamente ihre
+    // Rückzugswerte je Düsenart. Ohne Auflösen bekam jeder Bambu den allgemeinen Start-G-Code aus fdm_machine_common — kein
+    // Laden aus dem AMS (M620/T/M621), fest 205 °C → P1S druckte ohne Filament (Meldung #22, 17.11.2026; seit Slicer 1.0.4).
     $res = [];
-    foreach (array_reverse($chain) as $d) $res = array_merge($res, $d);
+    foreach (array_reverse($chain) as $d) {
+        foreach ((array)($d['include'] ?? []) as $i) {
+            if (!isset($idx[$i])) throw new RuntimeException("Vorlage fehlt: $kind/$i");
+            $t = json_decode((string)file_get_contents($idx[$i]), true) ?: [];
+            $res = array_merge($res, array_diff_key($t, array_flip(['name', 'type', 'from', 'instantiation', 'inherits', 'include', 'setting_id'])));
+        }
+        $res = array_merge($res, $d);
+    }
     // „nil“ ist bei den Rückzugs-Überschreibungen der Filamente gültig (= Wert des Druckers), bei diesen beiden nicht: Anycubic
     // Kobra S1 Max 0.6/0.8 (46 Profile) → CLI „filament_flush_temp: nil not in range“, rc -18 (15.11.2026). Weglassen = Orca-Standard.
     foreach (['filament_flush_temp', 'filament_flush_volumetric_speed'] as $k)
         if (isset($res[$k]) && ($res[$k] === 'nil' || (is_array($res[$k]) && in_array('nil', $res[$k], true)))) unset($res[$k]);
-    unset($res['inherits']);
+    unset($res['inherits'], $res['include']);
     $res['from'] = 'User';
     if ($kind !== 'machine') { $res['compatible_printers'] = []; $res['compatible_printers_condition'] = ''; }
     return array_merge($res, $over);
