@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 2bc2560d1e80c76e, 2026-11-17 12:13 UTC
- * 69 von 109 Funktionen, 19 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 0b9196ab962ad7b9, 2026-11-17 17:47 UTC
+ * 70 von 110 Funktionen, 19 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -247,6 +247,28 @@ function ps_machine_nozzles(?string $vendor, ?string $machine): array {
 }
 
 /**
+ * Betttemperatur für die gewählte Platte nachtragen (17.11.2026, Snapmaker U1): viele Herstellerprofile kennen nur eine PEI-Platte —
+ * „Snapmaker PLA @U1“ hat hot_plate_temp 55, aber textured_plate_temp 0 (42 von 93 U1-Filamenten in Orca 2.5.0). 0 heißt für Orca
+ * „Platte nicht geeignet“ → „Textured PEI Plate does not support filament 1“. Dann die Temperatur der anderen PEI-Platte nehmen
+ * (sonst der Engineering Plate). Bewusst NICHT auf die andere Platte umschalten: der U1-Startcode setzt bei „High Temp Plate“
+ * Z_OFFSET -0.07 — auf der Strukturplatte wäre die erste Schicht falsch.
+ */
+function ps_bed_temp_fill(array $f, string $bed): array {
+    $own = $bed === 'smooth' ? 'hot_plate_temp' : 'textured_plate_temp';
+    $from = [$bed === 'smooth' ? 'textured_plate_temp' : 'hot_plate_temp', 'eng_plate_temp'];
+    $val = fn(array $a, string $k) => (string)(((array)($a[$k] ?? []))[0] ?? '');   // $f immer übergeben (fn fängt nur eine Kopie)
+    $zero = fn($x) => $x === '' || !is_numeric($x) || (float)$x <= 0;
+    foreach (['', '_initial_layer'] as $sfx) {
+        if (!$zero($val($f, $own . $sfx))) continue;
+        foreach ($from as $src) if (!$zero($x = $val($f, $src . $sfx))) { $f[$own . $sfx] = [$x]; break; }
+    }
+    // Nur eine der beiden Angaben gefunden → die andere davon ableiten
+    if ($zero($val($f, $own)) && !$zero($x = $val($f, $own . '_initial_layer'))) $f[$own] = [$x];
+    if ($zero($val($f, $own . '_initial_layer')) && !$zero($x = $val($f, $own))) $f[$own . '_initial_layer'] = [$x];
+    return $f;
+}
+
+/**
  * Platzhalter der Experten-Einstellungen (print_xdef auf 3DSEARCH, xdef im Container): Prozesswerte des Profils für diese Düse,
  * dazu die Temperaturen des Filamentprofils für das gewählte Material und die Platte. Rückgabe ['vals' => …, 'caps' => …].
  */
@@ -262,7 +284,7 @@ function ps_xdef(string $vendor, string $machine, string $nozzle = '', string $m
         try {
             $prof = ps_filament_for($vendor, $machine, $material);
             [$fv, $fname] = str_contains($prof, '|') ? explode('|', $prof, 2) : [$vendor, $prof];
-            $f = ps_flatten($fv, 'filament', $fname);
+            $f = ps_bed_temp_fill(ps_flatten($fv, 'filament', $fname), $bed);
             $one = fn($k) => ($x = ((array)($f[$k] ?? []))[0] ?? null) !== null && is_numeric($x) ? (string)(int)$x : null;
             foreach (['nozzle_temperature', 'nozzle_temperature_initial_layer'] as $k) if (($x = $one($k)) !== null) $vals[$k] = $x;
             if (($x = $one($bed === 'smooth' ? 'hot_plate_temp' : 'textured_plate_temp')) !== null && $x !== '0') $vals['bed_temperature'] = $x;
@@ -980,7 +1002,8 @@ function ps_slice(array $job): array {
     $xf = $xo['fil'] ?? [];
     foreach (array_keys($xf) as $k) $applied[] = $k;
     $job['x_applied'] = $applied;
-    $fil_json = function (array $slot, string $file, string $suffix = '') use ($v, $machine, $xf): string {
+    $bed = $job['bed'];
+    $fil_json = function (array $slot, string $file, string $suffix = '') use ($v, $machine, $xf, $bed): string {
         $prof = ps_filament_for($v, $machine, (string)$slot['material']);
         [$fv, $fname] = str_contains($prof, '|') ? explode('|', $prof, 2) : [$v, $prof];
         $fover = ['compatible_printers' => [$machine]];
@@ -1003,6 +1026,7 @@ function ps_slice(array $job): array {
             foreach ($f as $fk => $fv_) if (preg_match('/_plate_temp(_initial_layer)?$/', $fk) && (string)(((array)$fv_)[0] ?? '0') !== '0') $f[$fk] = [(string)$xf['bed_temperature']];
             foreach (['hot_plate_temp', 'hot_plate_temp_initial_layer', 'textured_plate_temp', 'textured_plate_temp_initial_layer'] as $fk) $f[$fk] = [(string)$xf['bed_temperature']];
         }
+        $f = ps_bed_temp_fill($f, $bed);   // Profil ohne Temperatur für diese Platte (Snapmaker U1, 17.11.2026)
         if ($suffix !== '') $f['name'] = ($f['name'] ?? $fname) . $suffix;   // gleiche Namen mehrfach mag Orca nicht
         file_put_contents($file, json_encode($f, JSON_UNESCAPED_SLASHES));
         return $prof;
