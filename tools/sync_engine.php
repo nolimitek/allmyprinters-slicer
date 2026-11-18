@@ -18,7 +18,8 @@ if ($code === false) { fwrite(STDERR, "nicht lesbar: $src\n"); exit(1); }
 const ROOTS = ['ps_machine_list', 'ps_vendors', 'ps_profile_index', 'ps_machine_for', 'ps_machine_switches_by_t', 'ps_machine_caps',
     'ps_flatten', 'ps_process_for', 'ps_job_load', 'ps_job_dir', 'ps_file_name', 'ps_progress', 'ps_paint_view', 'ps_job_paint',
     'ps_job_create', 'ps_job_save', 'ps_map_view', 'ps_job_set_map', 'ps_worker_run_one', 'ps_cleanup',
-    'ps_machine_nozzles', 'ps_xdef'];   // Düse + Temperatur (1.0.7)
+    'ps_machine_nozzles', 'ps_xdef',   // Düse + Temperatur (1.0.7)
+    'ps_machine_bed'];   // Bettmaße für „passt auf“ (1.0.10)
 const ROOT_CONSTS = ['PS_DIR', 'PS_MATERIALS', 'PS_X_PROC', 'PS_ORCA'];
 // Pfade der Website → Ordner im Container (Datenträger /data)
 const PATHS = ['PS_DIR' => '/data/jobs', 'PS_PROFILE_DIR' => '/data/profiles', 'PS_THUMB_DIR' => '/data/thumbs', 'PS_FILES_DIR' => '/data/files'];

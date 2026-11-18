@@ -94,7 +94,7 @@ if ($a === 'version') {
     // (multi_start ab 1.0.3: Mehrfarbig für Drucker, deren Startbefehl die Fächer zuordnet — Bambu, Anycubic LAN, Elegoo, Creality, Flashforge;
     // thumbs ab 1.0.5: Vorschaubilder im G-Code fürs Display des Druckers, Modellbild in der Antwort auf a=job)
     amp_json(['name' => 'allmyprinters-slicer', 'api' => AMP_API, 'version' => AMP_VERSION, 'orca' => $orca, 'limits' => getenv('AMP_LIMITS') === '1',
-              'features' => ['multi_start', 'thumbs', 'nozzle_temp']]);   // nozzle_temp: Düsengröße + Temperatur (1.0.7)
+              'features' => ['multi_start', 'thumbs', 'nozzle_temp', 'bed']]);   // nozzle_temp: Düsengröße + Temperatur (1.0.7)
 }
 
 $dev = strtolower((string)($_SERVER['HTTP_X_AMP_DEVICE'] ?? ''));
@@ -164,7 +164,8 @@ if ($a === 'printer_info') {
     amp_json(['vendor' => $prof[0] ?? null, 'machine' => $prof[1] ?? null, 'exact' => $prof[2] ?? false,
               'switches_by_t' => $prof ? ps_machine_switches_by_t($prof[0], $prof[1]) : null,
               'caps' => $prof ? ps_machine_caps($prof[0], $prof[1]) : null, 'materials' => PS_MATERIALS,
-              'nozzles' => $prof ? ps_machine_nozzles($prof[0], $prof[1]) : []]);   // Düsengrößen mit Orca-Profil (1.0.7)
+              'nozzles' => $prof ? ps_machine_nozzles($prof[0], $prof[1]) : [],   // Düsengrößen mit Orca-Profil (1.0.7)
+              'bed' => $prof ? ps_machine_bed($prof[0], $prof[1]) : null]);   // [Breite, Tiefe, Höhe] mm für „passt auf“ (1.0.10)
 }
 
 if ($a === 'xdef') {

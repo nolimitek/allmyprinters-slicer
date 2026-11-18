@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 0b9196ab962ad7b9, 2026-11-17 17:47 UTC
- * 70 von 110 Funktionen, 19 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 4cb20337bd001584, 2026-11-18 13:07 UTC
+ * 71 von 111 Funktionen, 19 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -356,6 +356,27 @@ function ps_filament_for(string $vendor, string $machine, string $material): str
  * Was das Druckerprofil für die Experten-Einstellungen hergibt: Pause (machine_pause_gcode, z. B. M601 bzw. PAUSE)
  * und erlaubte Schichthöhen. Je Profil einmal je Aufruf gelesen.
  */
+/**
+ * Bettfläche und Bauhöhe des Druckers in mm: [Breite, Tiefe, Höhe] aus printable_area/printable_height des Orca-Profils, null wenn
+ * unbekannt. Für „passt auf“ in der Bibliothek von AllMyPrinters (Slicer 1.0.10, 18.11.2026).
+ */
+function ps_machine_bed(?string $vendor, ?string $machine): ?array {
+    static $cache = [];
+    if (!$vendor || !$machine) return null;
+    $k = "$vendor|$machine";
+    if (array_key_exists($k, $cache)) return $cache[$k];
+    try { $m = ps_flatten($vendor, 'machine', $machine); } catch (Throwable $e) { return $cache[$k] = null; }
+    $xs = $ys = [];
+    foreach ((array)($m['printable_area'] ?? []) as $pt) {
+        if (preg_match('/^\s*(-?[\d.]+)x(-?[\d.]+)\s*$/', (string)$pt, $mm)) { $xs[] = (float)$mm[1]; $ys[] = (float)$mm[2]; }
+    }
+    if (count($xs) < 3) return $cache[$k] = null;
+    $w = max($xs) - min($xs); $d = max($ys) - min($ys);
+    if ($w < 20 || $d < 20 || $w > 3000 || $d > 3000) return $cache[$k] = null;
+    $hv = $m['printable_height'] ?? null; $h = (float)(is_array($hv) ? ($hv[0] ?? 0) : ($hv ?? 0));
+    return $cache[$k] = [round($w, 1), round($d, 1), $h > 0 ? round($h, 1) : null];
+}
+
 function ps_machine_caps(?string $vendor, ?string $machine): array {
     static $cache = [];
     $none = ['pause' => false, 'lh' => [0.08, 0.32]];
