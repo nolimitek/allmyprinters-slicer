@@ -11,6 +11,7 @@
  *   GET  ?a=job&job=…                      Stand, dazu plan = Gramm je Fach
  *   GET  ?a=preview&job=…                  3D-Vorschau (binär, gzip)
  *   GET  ?a=gcode&job=…                    fertiger G-Code
+ *   GET  ?a=full3mf&job=…                  vollständige Projektdatei mit G-Code (nur wenn job.full3mf gesetzt: Flashforge Creator 5)
  *
  * Kein Konto: das Gerät nennt eine zufällige Kennung (X-AMP-Device, 32 hex). Aufträge gehören nur dieser Kennung.
  * Umgebung (alle optional):
@@ -176,7 +177,7 @@ if ($a === 'xdef') {
     amp_json(['vals' => (object)$r['vals'], 'caps' => $r['caps']]);
 }
 
-if ($a === 'job' || $a === 'preview' || $a === 'gcode') {
+if ($a === 'job' || $a === 'preview' || $a === 'gcode' || $a === 'full3mf') {
     $job = amp_job((string)($in['job'] ?? ''), $dev);
     if (!$job) amp_json(['error' => 'not_found'], 404);
     $dir = ps_job_dir($job['id']);
@@ -187,6 +188,17 @@ if ($a === 'job' || $a === 'preview' || $a === 'gcode') {
         header('Content-Encoding: gzip');
         header('Content-Length: ' . filesize($f));
         header('Cache-Control: private, max-age=3600, no-transform');
+        readfile($f);
+        exit;
+    }
+    if ($a === 'full3mf') {
+        // Vollständige Projektdatei mit G-Code (1.0.11, nur Flashforge Creator 5 — siehe ps_ff_full3mf)
+        $f = "$dir/out/plate_1.3mf";
+        if ($job['status'] !== 'done' || empty($job['full3mf']) || !is_file($f)) amp_json(['error' => 'not_ready'], 404);
+        amp_log($dev, 'full3mf', $job['id'] . ' ' . filesize($f));
+        header('Content-Type: application/octet-stream');
+        header('Content-Length: ' . filesize($f));
+        header('Content-Disposition: attachment; filename="' . preg_replace('/\.gcode$/i', '', str_replace('3DSEARCH_', 'AMP_', ps_file_name($job))) . '.3mf"');
         readfile($f);
         exit;
     }
@@ -217,7 +229,8 @@ if ($a === 'job' || $a === 'preview' || $a === 'gcode') {
                  'paint' => ps_paint_view($job), 'mix_temp' => $job['mix_temp'] ?? null, 'skipped_objs' => count($job['info3mf']['skip'] ?? []),
                  'rearranged' => !empty($job['rearranged']), 'x_applied' => count($job['x_applied'] ?? []), 'x_clamped' => $job['x_clamped'] ?? null,
                  'pause' => $job['x']['pause'] ?? [], 'scale' => $job['x']['scale'] ?? 1, 'objs' => array_sum(array_column($job['parts'] ?? [], 'copies')),
-                 'files' => count($job['parts'] ?? []), 'plan' => ps_job_paint($job), 'size' => @filesize(ps_job_dir($job['id']) . '/out/plate_1.gcode') ?: null];
+                 'files' => count($job['parts'] ?? []), 'plan' => ps_job_paint($job), 'size' => @filesize(ps_job_dir($job['id']) . '/out/plate_1.gcode') ?: null,
+                 'full3mf' => !empty($job['full3mf']) ? (@filesize(ps_job_dir($job['id']) . '/out/plate_1.3mf') ?: null) : null];
         // Modellbild (1.0.5): klein als WebP für die Druckkarte der App, auf Wunsch als PNG (Bambu: Metadata/plate_1.png im .gcode.3mf)
         if (is_file("$dir/thumb.webp")) $out['thumb'] = 'data:image/webp;base64,' . base64_encode((string)file_get_contents("$dir/thumb.webp"));
         if (!empty($in['png']) && is_file("$dir/thumb.png")) $out['thumb_png'] = base64_encode((string)file_get_contents("$dir/thumb.png"));

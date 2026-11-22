@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 4cb20337bd001584, 2026-11-18 13:07 UTC
- * 71 von 111 Funktionen, 19 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 86d5cd077b8a44b5, 2026-11-22 18:03 UTC
+ * 73 von 113 Funktionen, 19 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -1083,6 +1083,10 @@ function ps_slice(array $job): array {
     // Für jeden Lauf (Experten-Einstellungen): Drehen beim Anordnen, Pausen bei Höhe (Orca setzt dort machine_pause_gcode
     // des Druckers ein, z. B. M601 bzw. PAUSE — ersetzt Pausen/Farbwechsel aus der 3MF)
     $xs = [];
+    // Flashforge Creator 5 / 5 Pro (22.11.2026): zusätzlich die vollständige Projektdatei mit G-Code, wie sie der Flashforge-Slicer
+    // an den Drucker schickt (ps_ff_full3mf). --min-save lässt die Modellgeometrie weg (SkipModel im Slicer).
+    $ff_c5 = ps_ff_c5_model($machine);
+    if ($ff_c5) array_push($xs, '--export-3mf', 'full.3mf', '--min-save');
     if (!empty($xo['rot'])) $xs[] = '--allow-rotations';
     if (!empty($xo['pause'])) {
         file_put_contents("$dir/cg.json", json_encode(['mode' => $multi ? 'MultiExtruder' : 'SingleExtruder',
@@ -1210,7 +1214,80 @@ function ps_slice(array $job): array {
     }
     $job['stats'] = ps_preview_build($gcode, "$dir/preview.bin.gz", $m, $pal);
     try { ps_thumbs_after_slice($dir, $gcode, $m, $job['slot']['color'] ?? null); } catch (Throwable $e) {}
+    // Nach allem, was den G-Code noch ändert (Werkzeugwechsel, Vorschaubilder): die Datei bekommt genau diesen G-Code
+    unset($job['full3mf']);
+    if ($ff_c5) { try { if (ps_ff_full3mf($dir, $gcode, $ff_c5)) $job['full3mf'] = true; } catch (Throwable $e) {} }
     return $job;
+}
+
+/** „Flashforge-Creator-5-Pro“ / „Flashforge-Creator-5“ (model_id der Orca-Profile) für diese Drucker, sonst null */
+function ps_ff_c5_model(string $machine): ?string {
+    if (!preg_match('/^Flashforge Creator 5( Pro)?\b/i', $machine, $mm)) return null;
+    return 'Flashforge-Creator-5' . (!empty($mm[1]) ? '-Pro' : '');
+}
+
+/**
+ * Vollständige Druckdatei für den Flashforge Creator 5 → $dir/out/plate_1.3mf. Grundlage ist Orcas eigene Ausgabe
+ * (--export-3mf --min-save: project_settings, model_settings, plate_1.json, leeres 3dmodel). Angeglichen an das, was der
+ * Flashforge-Slicer schickt (Orca-Flashforge 1.7.15 SendToPrinter.cpp: immer .3mf, WithGcode | SkipModel; Beispieldatei
+ * FlashStudio 1.7.6 „c5pro-2color“): slice_info mit printer_model_id, extruder_type / nozzle_volume_type je Kopf und uuid,
+ * ohne die Felder, die nur Orca 2.5 schreibt; Vorschaubilder samt Verweisen; G-Code + Prüfsumme = der fertige G-Code.
+ * false = nicht gebaut (z. B. andere Platte als 1) — die App nimmt dann ihren bisherigen Weg.
+ */
+function ps_ff_full3mf(string $dir, string $gcode, string $model_id): bool {
+    $src = "$dir/out/full.3mf"; $dst = "$dir/out/plate_1.3mf";
+    @unlink($dst);
+    if (!is_file($src) || !class_exists('ZipArchive')) return false;
+    $z = new ZipArchive();
+    if ($z->open($src) !== true) return false;
+    $info = $z->getFromName('Metadata/slice_info.config');
+    $ms = $z->getFromName('Metadata/model_settings.config');
+    $rels = $z->getFromName('_rels/.rels');
+    if ($info === false || $ms === false || $rels === false || $z->locateName('Metadata/plate_1.gcode') === false
+        || !preg_match('/<metadata key="nozzle_diameters" value="([^"]*)"/', $info, $nd)) { $z->close(); @unlink($src); return false; }
+    $heads = max(1, count(explode(',', $nd[1])));
+    $zeros = implode(' ', array_fill(0, $heads, '0'));
+    $info = preg_replace('/(<header_item key="X-BBL-Client-Version" value=")[^"]*"/', '$1"', $info);
+    $info = preg_replace('/^\s*<header_item key="OrcaSlicer-Version"[^>]*>\R/m', '', $info);
+    $info = preg_replace('/^(\s*)<\/header>/m', '$1  <uuid value="' . bin2hex(random_bytes(16)) . '"/>' . "\n" . '$1</header>', $info, 1);
+    $info = preg_replace('/(<metadata key="(?:extruder_type|nozzle_volume_type)" value=")[^"]*"/', '${1}' . $zeros . '"', $info);
+    $info = preg_replace('/(<metadata key="printer_model_id" value=")[^"]*"/', '${1}' . $model_id . '"', $info);
+    $info = preg_replace('/^\s*<metadata key="(?:enable_filament_dynamic_map|has_filament_switcher)"[^>]*>\R/m', '', $info);
+    $info = preg_replace('/^\s*<nozzle [^>]*>\R/m', '', $info);
+    $info = preg_replace('/(<filament id="[^"]*" tray_info_idx="[^"]*" type="[^"]*" color="[^"]*" used_m="[^"]*" used_g="[^"]*")[^>]*\/>/', '$1 />', $info);
+    $z->addFromString('Metadata/slice_info.config', $info);
+    // Bilder: ohne Oberfläche erzeugt Orca keine — unser Modellbild (ps_thumbs_after_slice) in den Größen des Slicers
+    if (is_file("$dir/thumb.png") && ($im = @imagecreatefrompng("$dir/thumb.png"))) {
+        imagesavealpha($im, true);
+        $png = function (int $w) use ($im): string {
+            $o = imagecreatetruecolor($w, $w);
+            imagealphablending($o, false); imagesavealpha($o, true);
+            imagefill($o, 0, 0, imagecolorallocatealpha($o, 0, 0, 0, 127));
+            imagecopyresampled($o, $im, 0, 0, 0, 0, $w, $w, imagesx($im), imagesy($im));
+            ob_start(); imagepng($o, null, 9); imagedestroy($o);
+            return (string)ob_get_clean();
+        };
+        $big = $png(512);
+        foreach (['plate_1.png' => $big, 'plate_no_light_1.png' => $big, 'top_1.png' => $big, 'pick_1.png' => $big, 'plate_1_small.png' => $png(128)] as $n => $d) $z->addFromString("Metadata/$n", $d);
+        imagedestroy($im);
+        if (!str_contains($ms, 'thumbnail_file')) {
+            $ms = preg_replace('/^(\s*)(<metadata key="gcode_file"[^>]*>)/m', '$1$2' . "\n" . '$1<metadata key="thumbnail_file" value="Metadata/plate_1.png"/>' . "\n"
+                . '$1<metadata key="thumbnail_no_light_file" value="Metadata/plate_no_light_1.png"/>' . "\n" . '$1<metadata key="top_file" value="Metadata/top_1.png"/>' . "\n"
+                . '$1<metadata key="pick_file" value="Metadata/pick_1.png"/>' . "\n" . '$1<metadata key="pattern_bbox_file" value="Metadata/plate_1.json"/>', $ms, 1);
+            $z->addFromString('Metadata/model_settings.config', $ms);
+        }
+        if (!str_contains($rels, 'plate_1.png')) {
+            $rels = str_replace('</Relationships>', ' <Relationship Target="/Metadata/plate_1.png" Id="rel-2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"/>' . "\n"
+                . ' <Relationship Target="/Metadata/plate_1.png" Id="rel-4" Type="http://schemas.bambulab.com/package/2021/cover-thumbnail-middle"/>' . "\n"
+                . ' <Relationship Target="/Metadata/plate_1_small.png" Id="rel-5" Type="http://schemas.bambulab.com/package/2021/cover-thumbnail-small"/>' . "\n" . '</Relationships>', $rels);
+            $z->addFromString('_rels/.rels', $rels);
+        }
+    }
+    $z->addFile($gcode, 'Metadata/plate_1.gcode');
+    $z->addFromString('Metadata/plate_1.gcode.md5', strtoupper((string)md5_file($gcode)));
+    $ok = $z->close();
+    if (!$ok) { @unlink($src); return false; }
+    return rename($src, $dst);
 }
 
 /**
