@@ -17,7 +17,7 @@
  * Umgebung (alle optional):
  *   AMP_LIMITS=1        Grenzen wie auf allmyprinters.com: je Gerät 40 Slices/Tag, je Adresse 80/Tag (Standard: aus)
  *   AMP_QUEUE_MAX=8     wartende/laufende Aufträge gesamt; je Gerät immer nur einer
- *   AMP_CORS=…          erlaubte Herkunft für Browser-Aufrufe (Standard: die App-WebView)
+ *   AMP_CORS=…          erlaubte Herkünfte für Browser-Aufrufe, durch Leerzeichen getrennt (Standard: Android- und iOS-App)
  *   AMP_TRUST_PROXY=1   Client-Adresse aus X-Real-IP (nur hinter eigenem Reverse-Proxy setzen)
  *   AMP_LOG=1           Protokoll /data/log/slice.log, 30 Tage
  */
@@ -28,11 +28,12 @@ const AMP_DAY_DEVICE = 40;
 const AMP_DAY_IP = 80;
 define('AMP_VERSION', trim((string)@file_get_contents(__DIR__ . '/VERSION')) ?: 'dev');
 define('AMP_DATA', rtrim(getenv('AMP_DATA') ?: '/data', '/'));
-define('AMP_ORIGIN', getenv('AMP_CORS') ?: 'https://appassets.androidplatform.net');
+// Erlaubte Herkünfte, durch Leerzeichen getrennt: Android-App-WebView und iOS-App (amp://app, ab 1.0.12)
+define('AMP_ORIGINS', preg_split('/\s+/', trim(getenv('AMP_CORS') ?: 'https://appassets.androidplatform.net amp://app')));
 
 header('Vary: Origin');
-if (($_SERVER['HTTP_ORIGIN'] ?? '') === AMP_ORIGIN) {
-    header('Access-Control-Allow-Origin: ' . AMP_ORIGIN);
+if (in_array($_SERVER['HTTP_ORIGIN'] ?? '', AMP_ORIGINS, true)) {
+    header('Access-Control-Allow-Origin: ' . $_SERVER['HTTP_ORIGIN']);
     header('Access-Control-Allow-Headers: X-AMP-Device, Content-Type');
     header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
     header('Access-Control-Max-Age: 86400');
