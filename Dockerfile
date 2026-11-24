@@ -5,8 +5,8 @@
 # machine|process|filament). Dieselben Profile als JSON aus dem Quellcode genau dieser Version holen — Commit fest, git prüft
 # jeden Inhalt gegen seinen Hash. Läuft auf der Bau-Plattform (kein QEMU beim ARM64-Bau).
 FROM --platform=$BUILDPLATFORM alpine:3.20 AS profiles
-ARG ORCA_VERSION=2.5.0
-ARG ORCA_COMMIT=40ecc66f78ed72dc368e0c1ebe40d77f00cc8a19
+ARG ORCA_VERSION=2.5.2
+ARG ORCA_COMMIT=f92a7c065c5718b8ef1baac1cd704df2911238f4
 RUN apk add --no-cache git \
  && git clone -q --depth 1 --branch "v${ORCA_VERSION}" --filter=blob:none --sparse https://github.com/OrcaSlicer/OrcaSlicer.git /src \
  && cd /src && git sparse-checkout set resources/profiles \
@@ -15,9 +15,9 @@ RUN apk add --no-cache git \
 
 FROM ubuntu:24.04
 
-ARG ORCA_VERSION=2.5.0
-ARG ORCA_SHA256_AMD64=d13eb0a9cd618ed080ab6b82c64c0a60c4501aac91e88d5ac2c3b526fb141a7c
-ARG ORCA_SHA256_ARM64=00a4fa0a2f9c1649abb8c438b0537ed1e58fed5206faa560c1c0fb4ab225f9cf
+ARG ORCA_VERSION=2.5.2
+ARG ORCA_SHA256_AMD64=22fa88884dec3fdbd29e90cba9912fcff6fb57a60b1bdc1a6c189c61a6b0a870
+ARG ORCA_SHA256_ARM64=297aa2d8a83e8ea0a26b39e383a00f992bc0e3c1076368cad79b35704502a254
 ENV DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 LANG=C.UTF-8
 # Optional näherer Paketspiegel beim Bauen (z. B. --build-arg APT_MIRROR=http://ftp.halifax.rwth-aachen.de/ubuntu)
 ARG APT_MIRROR=

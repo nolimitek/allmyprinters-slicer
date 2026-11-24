@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 86d5cd077b8a44b5, 2026-11-22 18:03 UTC
- * 73 von 113 Funktionen, 19 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 a859ac164c1e1ca2, 2026-11-24 13:13 UTC
+ * 75 von 115 Funktionen, 19 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -191,13 +191,16 @@ function ps_machine_for(string $provider, string $model): ?array {
  * Wechselt dieses Maschinenprofil Fächer per T-Befehl? Ja, wenn change_filament_gcode „T[next_extruder]“ enthält
  * (Kobra S1/S1 Max/X) oder leer ist (Kobra 3 — dann schreibt Orca das T selbst). T0…Tn ist die übliche
  * ACE/MMU-Schnittstelle unter Klipper (Rinkhals, Happy Hare). Nein nur bei eigenem Wechsel-Code ohne T.
+ * Auch per Skript geschrieben („"T" + next_extruder“: Snapmaker U1, Prusa XL 5T) — vorher als „kein T“ gewertet, dann war beim
+ * U1 im Slicen nur Kopf 1 wählbar (Meldung #33, 24.11.2026).
  */
 function ps_machine_switches_by_t(string $vendor, string $machine): bool {
     static $cache = [];
     if (!isset($cache["$vendor|$machine"])) {
         try { $g = (string)(ps_flatten($vendor, 'machine', $machine)['change_filament_gcode'] ?? ''); } catch (Throwable $e) { $g = ''; }
         $code = trim(implode("\n", array_filter(array_map('trim', explode("\n", $g)), fn($l) => $l !== '' && $l[0] !== ';')));
-        $cache["$vendor|$machine"] = $code === '' || (bool)preg_match('/^T[\[{]next_extruder[\]}]/m', $code);
+        $cache["$vendor|$machine"] = $code === '' || (bool)preg_match('/^T[\[{]next_extruder[\]}]/m', $code)
+            || (bool)preg_match('/["\']T["\']\s*\+\s*next_extruder\b/', $code);
     }
     return $cache["$vendor|$machine"];
 }
@@ -1163,6 +1166,8 @@ function ps_slice(array $job): array {
         // gewählte Fach umschreiben. Ein zusätzliches T dahinter hieße: erst 1A laden, dann schneiden, wechseln, spülen.
         if (!empty($job['printer']['cfs']) && preg_match('/^T0\b/m', (string)file_get_contents($gcode, false, null, 0, 65536)))
             ps_remap_tools($gcode, [0 => [(int)$job['tool'], (string)$job['slot']['label']]]);
+        // Werkzeugwechsler (Snapmaker U1): Start-G-Code gleich für den gewählten Kopf (Meldung #33)
+        elseif (ps_machine_toolchanger((string)$job['printer']['vendor'], (string)$job['printer']['machine'])) ps_toolchanger_start($gcode, (int)$job['tool'], (string)$job['slot']['label']);
         else ps_insert_toolchange($gcode, (int)$job['tool'], (string)$job['slot']['label']);
     }
     if ($multi) {
@@ -1323,6 +1328,48 @@ function ps_pad_comments($out): void {
     $pad = str_repeat(';', $first - 1) . "\n";
     $pad .= str_repeat(str_repeat(';', 63) . "\n", intdiv($end - $pos - $first, 64) + 1);
     fwrite($out, $pad);
+}
+
+/** Werkzeugwechsler mit mehreren Düsen (Snapmaker U1, Prusa XL)? Das Maschinenprofil hat dann mehr als einen Düsendurchmesser. */
+function ps_machine_toolchanger(string $vendor, string $machine): bool {
+    static $c = [];
+    if (!isset($c["$vendor|$machine"])) {
+        try { $n = count((array)(ps_flatten($vendor, 'machine', $machine)['nozzle_diameter'] ?? [])); } catch (Throwable $e) { $n = 1; }
+        $c["$vendor|$machine"] = $n > 1;
+    }
+    return $c["$vendor|$machine"];
+}
+
+/**
+ * Einfarbig auf einem Werkzeugwechsler mit Kopf $tool (Meldung #33, 24.11.2026, Snapmaker U1): Orca schreibt den Start-G-Code
+ * für Kopf 1 (T0 heizen, vorextrudieren, die anderen Köpfe vorheizen und abschalten). Ein T<n> erst danach (ps_insert_toolchange)
+ * hieße: Kopf 1 vorbereitet, Kopf n kalt. Darum im Start-G-Code (bis zur ersten Schicht) Kopf 1 und Kopf n tauschen — T-Zeilen,
+ * T-Angaben von M104/M109/M568/G10, EXTRUDER=/INDEX=/TOOL= und extruder/extruderN — das ist der Start-G-Code, den Orca mit
+ * Kopf n als Startkopf schreibt. Spätere Werkzeugwahl entfällt (einfarbig gibt es nur diesen Kopf).
+ */
+function ps_toolchanger_start(string $gcode, int $tool, string $label): void {
+    $sw = fn(int $n): int => $n === 0 ? $tool : ($n === $tool ? 0 : $n);
+    $in = fopen($gcode, 'r');
+    $out = fopen("$gcode.tmp", 'w');
+    $body = false;
+    while (($l = fgets($in)) !== false) {
+        if (!$body && strncmp($l, ';LAYER_CHANGE', 13) === 0) $body = true;
+        if (trim($l) === '' || $l[0] === ';') { fwrite($out, $l); continue; }
+        if ($body) {
+            if ($l[0] === 'T' && preg_match('/^T\d+\b/', $l)) { fwrite($out, '; ' . rtrim($l) . " ; 3DSEARCH: Orcas Werkzeugwahl entfernt, Kopf $label bleibt\n"); continue; }
+            fwrite($out, $l); continue;
+        }
+        $k = strpos($l, ';');
+        $code = $k === false ? rtrim($l, "\r\n") : substr($l, 0, $k);
+        $rest = $k === false ? "\n" : substr($l, $k);
+        $new = preg_replace_callback('/^T(\d+)\b/', fn($m) => 'T' . $sw((int)$m[1]), $code);
+        if (preg_match('/^(M104|M109|M568|G10)\b/', $new)) $new = preg_replace_callback('/\bT(\d+)\b/', fn($m) => 'T' . $sw((int)$m[1]), $new);
+        $new = preg_replace_callback('/\b(EXTRUDER|INDEX|TOOL)=(\d+)\b/i', fn($m) => $m[1] . '=' . $sw((int)$m[2]), $new);
+        $new = preg_replace_callback('/\b(HEATER|EXTRUDER)=extruder(\d*)\b/i', fn($m) => $m[1] . '=extruder' . (($x = $sw($m[2] === '' ? 0 : (int)$m[2])) ? $x : ''), $new);
+        fwrite($out, $new . ($new !== $code ? ($k === false ? " ; 3DSEARCH: Kopf $label statt Kopf 1\n" : $rest) : $rest));
+    }
+    fclose($in); fclose($out);
+    rename("$gcode.tmp", $gcode);
 }
 
 function ps_insert_toolchange(string $gcode, int $tool, string $label): void {
