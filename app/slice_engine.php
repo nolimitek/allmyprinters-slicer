@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 a859ac164c1e1ca2, 2026-11-24 13:13 UTC
- * 75 von 115 Funktionen, 19 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 a3fc151b984917ce, 2026-11-25 20:34 UTC
+ * 76 von 116 Funktionen, 19 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -55,6 +55,8 @@ const PS_X_PROC = [
     'support_interface_top_layers' => ['i', 0, 10],
     'brim_type' => ['e', ['auto_brim', 'outer_only', 'inner_only', 'outer_and_inner', 'brim_ears', 'no_brim']],
     'brim_width' => ['f', 0, 30], 'skirt_loops' => ['i', 0, 10],
+    // Reinigungsturm an/aus (25.11.2026, User: „einstellen, ob ich den Reinigungsturm drucken will“); leer = Profil bzw. 3MF
+    'enable_prime_tower' => ['b'],
 ];
 // Temperatur (15.11.2026, Community-Wünsche „Set nozzle and bed temperature“): überschreibt das Filamentprofil — gilt für alle
 // Filamente des Drucks. Leer = aus dem Profil. Düse auch für die Stahl-/Messing-Varianten (Orca 2.5: nozzle_temperature_HS/_BRASS).
@@ -1207,7 +1209,9 @@ function ps_slice(array $job): array {
         // Immer auch G90 + Extrusionsart nach jedem Wechsel (Wechsel-Makro ließ am 02.10. G91 stehen) — nicht bei Creality,
         // dort gehört der Wechsel der Firmware
         // 'keep' (App: Bambu, Elegoo, Creality, Flashforge): T bleibt — Bambu wechselt per M620 S<n>, ein Umschreiben nur der T-Zeilen passte nicht dazu
-        if ($job['printer']['provider'] !== 'creality' && $tm !== 'keep') ps_remap_tools($gcode, $tools, $job['printer']['provider'] === 'moonraker' && $tm === '');
+        // Werkzeugwechsler (U1): alle Kopfangaben umsetzen, nicht nur T-Zeilen (ps_tool_perm, 25.11.2026)
+        if ($job['printer']['provider'] !== 'creality' && $tm !== 'keep') ps_remap_tools($gcode, $tools, $job['printer']['provider'] === 'moonraker' && $tm === '',
+            $job['printer']['provider'] === 'moonraker' && ps_machine_toolchanger((string)$job['printer']['vendor'], (string)$job['printer']['machine']));
     }
     $job['slice_seconds'] = round(microtime(true) - $t0, 1);
     $job['profiles'] = ['machine' => $machine, 'process' => $process, 'filament' => $filament];
@@ -1411,14 +1415,44 @@ function ps_orca_self_inherit(): bool {
     return $v;
 }
 
-function ps_remap_tools(string $gcode, array $tools, bool $pad = false): void {
+/**
+ * Werkzeugwechsler (Snapmaker U1, 25.11.2026 — Chris' U1: „Düsentemperatur zu niedrig“ beim Wechsel auf den anderen Kopf): Orcas
+ * Kopfwechsel-Code heizt per „M109 S… T<n>“ und extrudiert per „SM_PRINT_PREEXTRUDE_FILAMENT INDEX=<n>“ vor — wurde nur die T-Zeile
+ * umgesetzt, heizte der Drucker den Kopf aus Orcas Reihenfolge und wechselte auf einen kalten. Darum hier ALLE Kopfangaben im ganzen
+ * G-Code (auch Startcode: initial_extruder) über eine vollständige Vertauschung: gewählte Köpfe wie zugeordnet, übrige Orca-Nummern
+ * auf die übrigen Köpfe (Startcode spricht alle 4 Köpfe an — Vorheizen, Einziehen, Flusskalibrierung bleiben je Kopf einmal).
+ * Gleiche Regeln wie ps_toolchanger_start (einfarbig): T-Zeilen, T bei M104/M109/M568/G10, EXTRUDER=/INDEX=/TOOL=, extruderN.
+ */
+function ps_tool_perm(array $tools): array {
+    $perm = [];
+    foreach ($tools as $src => $v) $perm[(int)$src] = (int)$v[0];
+    $max = max(array_merge(array_keys($perm), array_values($perm), [3]));
+    for ($s = 0; $s <= $max; $s++) if (!isset($perm[$s]) && !in_array($s, $perm, true)) $perm[$s] = $s;
+    $free = array_values(array_diff(range(0, $max), array_values($perm)));
+    for ($s = 0; $s <= $max; $s++) if (!isset($perm[$s])) $perm[$s] = array_shift($free) ?? $s;
+    ksort($perm);
+    return $perm;
+}
+
+function ps_remap_tools(string $gcode, array $tools, bool $pad = false, bool $tc = false): void {
     $in = fopen($gcode, 'r');
     $out = fopen("$gcode.tmp", 'w');
     $e_mode = 'M83';   // Extrusionsart, die vor dem Wechsel galt, wiederherstellen (nicht blind M83)
+    $perm = $tc ? ps_tool_perm($tools) : null;
+    $sw = fn(int $n): int => $perm[$n] ?? $n;
     while (($l = fgets($in)) !== false) {
         if ($l[0] === 'M' && preg_match('/^M8[23]\b/', $l)) $e_mode = substr($l, 0, 3);
-        if ($l[0] === 'T' && preg_match('/^T(\d+)\b/', $l, $m) && isset($tools[(int)$m[1]])) {
-            [$t, $label] = $tools[(int)$m[1]];
+        if ($perm !== null && $l[0] !== ';' && $l[0] !== 'T' && trim($l) !== '') {
+            $k = strpos($l, ';');
+            $code = $k === false ? rtrim($l, "\r\n") : substr($l, 0, $k);
+            $new = $code;
+            if (preg_match('/^(M104|M109|M568|G10)\b/', $new)) $new = preg_replace_callback('/\bT(\d+)\b/', fn($m) => 'T' . $sw((int)$m[1]), $new);
+            $new = preg_replace_callback('/\b(EXTRUDER|INDEX|TOOL)=(\d+)\b/i', fn($m) => $m[1] . '=' . $sw((int)$m[2]), $new);
+            $new = preg_replace_callback('/\b(HEATER|EXTRUDER)=extruder(\d*)\b/i', fn($m) => $m[1] . '=extruder' . (($x = $sw($m[2] === '' ? 0 : (int)$m[2])) ? $x : ''), $new);
+            if ($new !== $code) { fwrite($out, $new . ($k === false ? " ; 3DSEARCH: Kopf umgesetzt\n" : substr($l, $k))); continue; }
+        }
+        if ($l[0] === 'T' && preg_match('/^T(\d+)\b/', $l, $m) && ($perm !== null ? isset($perm[(int)$m[1]]) : isset($tools[(int)$m[1]]))) {
+            [$t, $label] = $tools[(int)$m[1]] ?? [$sw((int)$m[1]), (string)($sw((int)$m[1]) + 1)];
             fwrite($out, "T$t ; change extruder (3DSEARCH: filament " . ((int)$m[1] + 1) . " -> slot $label)\nG90\n$e_mode\n");
             if ($pad) ps_pad_comments($out);   // Klipper/Kobra: siehe ps_pad_comments
             continue;

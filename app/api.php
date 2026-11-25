@@ -96,7 +96,7 @@ if ($a === 'version') {
     // (multi_start ab 1.0.3: Mehrfarbig für Drucker, deren Startbefehl die Fächer zuordnet — Bambu, Anycubic LAN, Elegoo, Creality, Flashforge;
     // thumbs ab 1.0.5: Vorschaubilder im G-Code fürs Display des Druckers, Modellbild in der Antwort auf a=job)
     amp_json(['name' => 'allmyprinters-slicer', 'api' => AMP_API, 'version' => AMP_VERSION, 'orca' => $orca, 'limits' => getenv('AMP_LIMITS') === '1',
-              'features' => ['multi_start', 'thumbs', 'nozzle_temp', 'bed']]);   // nozzle_temp: Düsengröße + Temperatur (1.0.7)
+              'features' => ['multi_start', 'thumbs', 'nozzle_temp', 'bed', 'prime_tower']]);   // nozzle_temp: Düsengröße + Temperatur (1.0.7); prime_tower: x_enable_prime_tower (1.0.14)
 }
 
 $dev = strtolower((string)($_SERVER['HTTP_X_AMP_DEVICE'] ?? ''));
