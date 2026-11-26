@@ -1,7 +1,7 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 a3fc151b984917ce, 2026-11-25 20:34 UTC
+ * Quelle: print_slice_lib.php, sha256 a1ad2a73cd756062, 2026-11-26 06:55 UTC
  * 76 von 116 Funktionen, 19 Konstanten.
  */
 
@@ -1053,6 +1053,9 @@ function ps_slice(array $job): array {
             foreach (['hot_plate_temp', 'hot_plate_temp_initial_layer', 'textured_plate_temp', 'textured_plate_temp_initial_layer'] as $fk) $f[$fk] = [(string)$xf['bed_temperature']];
         }
         $f = ps_bed_temp_fill($f, $bed);   // Profil ohne Temperatur für diese Platte (Snapmaker U1, 17.11.2026)
+        // Prusa-Startskripte lesen filament_notes[initial_tool] (MBL-Temperatur) — fehlt das Feld, bricht Orca mehrfarbig mit „Indexing an
+        // empty vector variable“ ab (XL 5T, MK4/CORE One MMU3, CORE One INDX; Durchlauf aller gängigen Drucker 26.11.2026)
+        if (!isset($f['filament_notes'])) $f['filament_notes'] = [''];
         if ($suffix !== '') $f['name'] = ($f['name'] ?? $fname) . $suffix;   // gleiche Namen mehrfach mag Orca nicht
         file_put_contents($file, json_encode($f, JSON_UNESCAPED_SLASHES));
         return $prof;
@@ -1126,7 +1129,10 @@ function ps_slice(array $job): array {
             }
             [$rc, $res] = ps_run_orca($dir, "$dir/out", $inputs, array_merge($is_stl ? $xstl : $x3, $xs), $is_stl ? '0' : $pl, $fil_files, $arrange);
             if ($rc === 0) break;
-            if ($arrange === '1' && !str_contains((string)($res['error_string'] ?? ''), 'unprintable area')) break;
+            // Turm über dem Bettrand: Orca sagt „unprintable area“ oder (Creality Hi, 26.11.2026) „Object conflicts“ + im Protokoll
+            // „Prime tower is partially outside the printable area“ → nächste Turmposition probieren
+            $tower_out = str_contains((string)($res['error_string'] ?? ''), 'unprintable area') || str_contains((string)@file_get_contents("$dir/out.log"), 'Prime tower is partially outside');
+            if ($arrange === '1' && !$tower_out) break;
         }
         $job['tower'] = $spot;
         if ($rc === 0 && $arrange === '1' && !$auto && !$is_stl) $job['rearranged'] = true;
