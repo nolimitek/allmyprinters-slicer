@@ -1,8 +1,8 @@
 <?php
 /**
  * AllMyPrinters Slicer — Slice-Kern, GENERIERT aus 3DSEARCH print_slice_lib.php (tools/sync_engine.php). Nicht von Hand ändern.
- * Quelle: print_slice_lib.php, sha256 a1ad2a73cd756062, 2026-11-26 06:55 UTC
- * 76 von 116 Funktionen, 19 Konstanten.
+ * Quelle: print_slice_lib.php, sha256 515da46115148af0, 2026-11-26 19:18 UTC
+ * 77 von 117 Funktionen, 19 Konstanten.
  */
 
 define('PS_DIR', rtrim(getenv('AMP_DATA') ?: '/data', '/') . '/jobs');
@@ -626,6 +626,24 @@ function ps_inspect_3mf(string $path, int $plate = 1, array $skip = []): array {
         }
         if ($fp) fclose($fp);
     }
+    // Farbwechsel nach Höhe (26.11.2026, HueForge-Bild „tree_hf“ aus Bambu Studio für P1S + AMS): alle Teile auf Filament 1,
+    // ab 1,3 mm Filament 2 per Werkzeugwechsel in Metadata/custom_gcode_per_layer.xml. Galt als einfarbig → Orca bekam ein
+    // Filament (das zweite holte es sich aus der 3MF, ohne Fach), am U1 entfernte die Einkopf-Nachbearbeitung den Wechsel,
+    // an AMS/ACE wechselte der Drucker ins zufällig belegte Fach 2. Jetzt zählen diese Filamente wie benutzte: Zuordnung zu
+    // Fächern, Orca wechselt dort (ToolOrdering: nur bei einem Objekt-Filament und Modus MultiAsSingle — sonst verwirft Orca
+    // die Wechsel ohnehin, dann hier auch nicht zählen).
+    $info['obj_extruders'] = $info['extruders'];
+    if (count($info['extruders']) === 1 && !$info['painted_color']) {
+        $info['layer_tc'] = ps_3mf_layer_toolchanges($z, $info['plate']);
+        $lx = array_unique(array_merge($info['extruders'], array_column($info['layer_tc'], 'ext')));
+        sort($lx);
+        if (count($lx) > 1) {
+            $info['extruders'] = array_values($lx);
+            $info['filaments'] = count($lx);
+            $info['layer_multi'] = true;
+            $info['nfil'] = max($info['nfil'], max($lx));
+        }
+    }
     $z->close();
     // Bemalt zählt nur, wenn es überhaupt ein zweites Filament gibt (Wespenfalle: Deckel komplett mit Filament 1
     // „bemalt“, paint_color="4", Projekt hat genau ein Filament → einfarbig)
@@ -670,6 +688,29 @@ function ps_3mf_plate_files(ZipArchive $z, array $objs): ?array {
         foreach ($pp[1] as $f) $files[$f] = true;
     }
     return $files ? array_keys($files) : null;
+}
+
+/**
+ * Werkzeugwechsel nach Höhe aus Metadata/custom_gcode_per_layer.xml (Bambu Studio / Orca) für Platte $plate:
+ * <plate><plate_info id="N"/><layer top_z="1.3" type="2" extruder="2" …/><mode value="MultiAsSingle"/></plate>.
+ * type 2 = ToolChange (0 = Farbwechsel M600, 1 = Pause, 4 = eigener G-Code). Nur Modus MultiAsSingle — im Modus
+ * MultiExtruder verwirft Orca Werkzeugwechsel nach Höhe. Rückgabe [['z' => 1.3, 'ext' => 2], …], sonst [].
+ */
+function ps_3mf_layer_toolchanges(ZipArchive $z, int $plate): array {
+    $st = $z->statName('Metadata/custom_gcode_per_layer.xml');
+    if (!$st || $st['size'] > 1024 * 1024) return [];
+    $xml = @simplexml_load_string((string)$z->getFromName('Metadata/custom_gcode_per_layer.xml'));
+    if (!$xml) return [];
+    $out = [];
+    foreach ($xml->plate as $pl) {
+        if ((int)($pl->plate_info['id'] ?? 1) !== $plate) continue;
+        if ((string)($pl->mode['value'] ?? 'MultiAsSingle') !== 'MultiAsSingle') return [];
+        foreach ($pl->layer as $ly) {
+            $e = (int)$ly['extruder'];
+            if ((int)$ly['type'] === 2 && $e >= 1 && $e <= 32) $out[] = ['z' => round((float)$ly['top_z'], 3), 'ext' => $e, 'color' => (string)$ly['color']];
+        }
+    }
+    return $out;
 }
 
 /**
@@ -1085,7 +1126,8 @@ function ps_slice(array $job): array {
     // gewählten Fach über den Geometrie-Weg. Mehrfarbdruck mit Fach-Zuordnung ist die nächste Ausbaustufe.
     $i3 = $job['info3mf'] ?? null;
     $pl = (string)(int)($i3['plate'] ?? 1);   // gewählte Platte der 3MF
-    $as_single = !$multi && $i3 && (!empty($i3['multi']) || ($i3['extruders'] ?? [1]) !== [1]);
+    // Nur Farbwechsel nach Höhe (layer_multi): wie vor dem 26.11.2026 die 3MF unverändert an Orca, der Geometrie-Weg verlöre sie
+    $as_single = !$multi && $i3 && ((!empty($i3['multi']) && empty($i3['layer_multi'])) || ($i3['obj_extruders'] ?? $i3['extruders'] ?? [1]) !== [1]);
     // Teile weglassen (identify_id je Instanz, ps_inspect_3mf) — gilt für jeden 3MF-Lauf; der Geometrie-Rückfall lässt sie selbst weg
     $x3 = !empty($i3['skip']) ? ['--skip-objects', implode(',', $i3['skip'])] : [];
     // Für jeden Lauf (Experten-Einstellungen): Drehen beim Anordnen, Pausen bei Höhe (Orca setzt dort machine_pause_gcode
@@ -1097,8 +1139,12 @@ function ps_slice(array $job): array {
     if ($ff_c5) array_push($xs, '--export-3mf', 'full.3mf', '--min-save');
     if (!empty($xo['rot'])) $xs[] = '--allow-rotations';
     if (!empty($xo['pause'])) {
-        file_put_contents("$dir/cg.json", json_encode(['mode' => $multi ? 'MultiExtruder' : 'SingleExtruder',
-            'gcodes' => array_map(fn($z) => ['type' => 'PausePrint', 'print_z' => (float)$z, 'color' => '', 'extruder' => 1, 'extra' => ''], $xo['pause'])]));
+        // Werkzeugwechsel nach Höhe aus der 3MF (layer_tc, 26.11.2026) gingen dabei verloren → mitschicken, Modus wie in der 3MF
+        $ltc = $i3['layer_tc'] ?? [];
+        $cgs = array_merge(array_map(fn($z) => ['type' => 'PausePrint', 'print_z' => (float)$z, 'color' => '', 'extruder' => 1, 'extra' => ''], $xo['pause']),
+                           array_map(fn($t) => ['type' => 'ToolChange', 'print_z' => (float)$t['z'], 'color' => (string)($t['color'] ?? ''), 'extruder' => (int)$t['ext'], 'extra' => ''], $ltc));
+        usort($cgs, fn($a, $b) => $a['print_z'] <=> $b['print_z']);
+        file_put_contents("$dir/cg.json", json_encode(['mode' => $ltc ? 'MultiAsSingle' : ($multi ? 'MultiExtruder' : 'SingleExtruder'), 'gcodes' => $cgs]));
         array_push($xs, '--load-custom-gcodes', "$dir/cg.json");
     }
     // STL (eine oder mehrere Dateien auf einer Platte): Ausrichten, Kopien je Datei, Filament je Datei
